@@ -1,6 +1,6 @@
 const { SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 const { successEmbed, errorEmbed, Colors } = require('../../utils/embeds');
-const { query } = require('../../utils/db');
+const { query, getPool } = require('../../utils/db');
 const { validateAssignableRoles } = require('../../utils/roleValidation');
 const logger = require('../../utils/logger');
 
@@ -96,19 +96,23 @@ module.exports = {
       return interaction.reply({ embeds: [errorEmbed('Error', 'Could not send the button role panel. Check channel permissions.')], ephemeral: true });
     }
 
-    // Insert all rows in a single transaction
-    const client = await query('BEGIN');
+    // Insert all rows in a single transaction using a dedicated client
+    const pgClient = await getPool().connect();
     try {
+      await pgClient.query('BEGIN');
       for (const btn of buttons) {
-        await query(
+        await pgClient.query(
           'INSERT INTO component_roles (guild_id, channel_id, message_id, custom_id, role_id, label) VALUES ($1, $2, $3, $4, $5, $6)',
           [interaction.guildId, channel.id, msg.id, btn.customId, btn.roleId, btn.label]
         );
       }
-      await query('COMMIT');
+      await pgClient.query('COMMIT');
     } catch (err) {
-      await query('ROLLBACK');
+      await pgClient.query('ROLLBACK');
       logger.error(`Button role DB error: ${err.message}`);
+      return interaction.reply({ embeds: [errorEmbed('DB Error', 'Panel was posted but roles could not be saved.')], ephemeral: true });
+    } finally {
+      pgClient.release();
     }
 
     await interaction.reply({ embeds: [successEmbed('Button Roles Created', `Panel posted in ${channel}.`)], ephemeral: true });

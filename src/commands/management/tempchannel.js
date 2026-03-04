@@ -5,7 +5,7 @@ const logger = require('../../utils/logger');
 
 async function getUserTempChannel(interaction) {
   const { rows } = await query(
-    'SELECT * FROM temp_channels WHERE guild_id = $1 AND owner_id = $2',
+    'SELECT channel_id, guild_id, owner_id, parent_id, control_message_id FROM temp_channels WHERE guild_id = $1 AND owner_id = $2',
     [interaction.guildId, interaction.user.id]
   );
   return rows[0];
@@ -58,7 +58,11 @@ module.exports = {
     if (!channel) return interaction.reply({ embeds: [errorEmbed('Not Found', 'Your temp channel no longer exists.')], ephemeral: true });
 
     if (sub === 'name') {
-      const name = interaction.options.getString('name');
+      const rawName = interaction.options.getString('name');
+      const name = rawName.replace(/[\x00-\x1F\x7F]/g, '').trim();
+      if (!name || name.length > 100) {
+        return interaction.reply({ embeds: [errorEmbed('Invalid Name', 'Channel name must be 1-100 characters.')], ephemeral: true });
+      }
       try {
         await channel.setName(name);
       } catch (err) {

@@ -30,10 +30,15 @@ module.exports = {
       return interaction.reply({ embeds: [errorEmbed('Unmute Failed', 'Could not unmute this user.')], ephemeral: true });
     }
 
-    await query(
-      'UPDATE infractions SET active = 0 WHERE guild_id = $1 AND user_id = $2 AND type = $3 AND active = 1',
-      [interaction.guildId, user.id, 'mute']
-    );
+    try {
+      await query(
+        'UPDATE infractions SET active = 0 WHERE guild_id = $1 AND user_id = $2 AND type = $3 AND active = 1',
+        [interaction.guildId, user.id, 'mute']
+      );
+    } catch (err) {
+      logger.error(`Failed to update mute infraction for ${user.id}: ${err.message}`);
+      return interaction.reply({ embeds: [errorEmbed('Partial Failure', 'User was unmuted but the infraction record could not be updated (DB error).')], ephemeral: true });
+    }
 
     await interaction.reply({ embeds: [successEmbed('User Unmuted', `**${user.tag || user.username}** has been unmuted.`)] });
 

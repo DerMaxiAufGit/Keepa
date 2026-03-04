@@ -2,6 +2,7 @@ const { SlashCommandBuilder } = require('discord.js');
 const { successEmbed, errorEmbed, modLogEmbed } = require('../../utils/embeds');
 const { query, getGuildConfig } = require('../../utils/db');
 const { parseDuration, formatDuration, nowUnixSeconds } = require('../../utils/time');
+const { truncate } = require('../../utils/strings');
 const logger = require('../../utils/logger');
 
 module.exports = {
@@ -28,8 +29,8 @@ module.exports = {
     if (user.id === interaction.user.id) {
       return interaction.reply({ embeds: [errorEmbed('Invalid Target', 'You cannot ban yourself.')], ephemeral: true });
     }
-    if (user.id === client.user.id) {
-      return interaction.reply({ embeds: [errorEmbed('Invalid Target', 'I cannot ban myself.')], ephemeral: true });
+    if (user.bot) {
+      return interaction.reply({ embeds: [errorEmbed('Invalid Target', 'Use the bot settings to remove a bot.')], ephemeral: true });
     }
 
     const duration = parseDuration(durationStr);
@@ -52,16 +53,21 @@ module.exports = {
     const now = nowUnixSeconds();
     const expiresAt = duration ? now + duration : null;
 
-    const result = await query(
-      'INSERT INTO infractions (guild_id, user_id, moderator_id, type, reason, duration, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
-      [interaction.guildId, user.id, interaction.user.id, 'ban', reason, duration, expiresAt]
-    );
-
-    const caseId = result.rows[0].id;
+    let caseId = '?';
+    try {
+      const result = await query(
+        'INSERT INTO infractions (guild_id, user_id, moderator_id, type, reason, duration, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
+        [interaction.guildId, user.id, interaction.user.id, 'ban', reason, duration, expiresAt]
+      );
+      caseId = result.rows[0].id;
+    } catch (err) {
+      logger.error(`Failed to record ban infraction for ${user.id}: ${err.message}`);
+      return interaction.reply({ embeds: [errorEmbed('Partial Failure', 'User was banned but the infraction could not be recorded (DB error).')], ephemeral: true });
+    }
 
     // DM after action succeeds — may fail if user has DMs disabled
     try {
-      await user.send(`You have been banned from **${interaction.guild.name}**.\nReason: ${reason}${duration ? `\nDuration: ${formatDuration(duration)}` : ''}`);
+      await user.send(`You have been banned from **${interaction.guild.name}**.\nReason: ${truncate(reason, 1000)}${duration ? `\nDuration: ${formatDuration(duration)}` : ''}`);
     } catch {}
 
     await interaction.reply({ embeds: [successEmbed('User Banned', `**${user.tag || user.username}** has been banned.\nCase #${caseId}`)] });

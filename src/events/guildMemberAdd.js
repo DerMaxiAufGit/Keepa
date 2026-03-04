@@ -2,11 +2,8 @@ const { EmbedBuilder } = require('discord.js');
 const { getGuildConfig, query } = require('../utils/db');
 const { Colors } = require('../utils/embeds');
 const { nowUnixSeconds } = require('../utils/time');
+const { escapeMarkdown } = require('../utils/strings');
 const logger = require('../utils/logger');
-
-function escapeMarkdown(text) {
-  return text.replace(/([*_~|\\])/g, '\\$1');
-}
 
 module.exports = {
   async execute(member, client) {
@@ -43,7 +40,10 @@ module.exports = {
       const updatedJoins = [...filtered, now];
       client.raidTracker.set(member.guild.id, { joins: updatedJoins });
 
-      if (updatedJoins.length >= config.anti_raid_threshold) {
+      const tracker2 = client.raidTracker.get(member.guild.id);
+      if (updatedJoins.length >= config.anti_raid_threshold && !tracker2.inLockdown) {
+        client.raidTracker.set(member.guild.id, { joins: [], inLockdown: true });
+
         const channels = member.guild.channels.cache.filter(c => c.isTextBased() && c.permissionsFor(member.guild.roles.everyone).has('SendMessages'));
         for (const [, ch] of channels) {
           await ch.permissionOverwrites.edit(member.guild.roles.everyone, { SendMessages: false, Connect: false })
@@ -63,15 +63,19 @@ module.exports = {
           }
         }
 
-        // Auto-unlock after 10 minutes
+        // Auto-unlock after 10 minutes — re-query channels at unlock time
+        const guildId = member.guild.id;
         setTimeout(async () => {
-          for (const [, ch] of channels) {
-            await ch.permissionOverwrites.edit(member.guild.roles.everyone, { SendMessages: null, Connect: null })
+          const guild = client.guilds.cache.get(guildId);
+          if (!guild) return;
+          const currentChannels = guild.channels.cache.filter(c => c.isTextBased());
+          for (const [, ch] of currentChannels) {
+            await ch.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: null, Connect: null })
               .catch(err => logger.warn(`Raid unlock perm edit failed: ${err.message}`));
           }
+          const t = client.raidTracker.get(guildId);
+          if (t) client.raidTracker.set(guildId, { ...t, inLockdown: false });
         }, 600000);
-
-        client.raidTracker.set(member.guild.id, { joins: [] });
       }
     }
 
@@ -95,7 +99,7 @@ module.exports = {
         const text = config.welcome_message
           .replace(/{user}/g, safeUsername)
           .replace(/{user\.mention}/g, `<@${member.id}>`)
-          .replace(/{server}/g, member.guild.name)
+          .replace(/{server}/g, escapeMarkdown(member.guild.name))
           .replace(/{membercount}/g, member.guild.memberCount);
 
         if (config.welcome_embed) {

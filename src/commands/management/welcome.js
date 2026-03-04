@@ -1,6 +1,7 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const { successEmbed, Colors } = require('../../utils/embeds');
 const { getGuildConfig, setGuildConfig } = require('../../utils/db');
+const { escapeMarkdown } = require('../../utils/strings');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -44,9 +45,9 @@ module.exports = {
       if (!channel) return interaction.reply({ content: 'Welcome channel not found.', ephemeral: true });
 
       const text = config.welcome_message
-        .replace(/{user}/g, interaction.user.username)
+        .replace(/{user}/g, escapeMarkdown(interaction.user.username))
         .replace(/{user\.mention}/g, `<@${interaction.user.id}>`)
-        .replace(/{server}/g, interaction.guild.name)
+        .replace(/{server}/g, escapeMarkdown(interaction.guild.name))
         .replace(/{membercount}/g, interaction.guild.memberCount);
 
       if (config.welcome_embed) {

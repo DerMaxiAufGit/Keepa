@@ -1,8 +1,7 @@
 # Code Review Report — Keepa Discord Bot
 
 **Date:** 2026-03-04
-**Files reviewed:** 51
-**Verdict:** BLOCK — 9 CRITICAL issues must be resolved before merge.
+**52 files changed** | **+1,308 / -866 lines** | SQLite to PostgreSQL migration + security hardening
 
 ---
 
@@ -10,969 +9,539 @@
 
 | Severity | Count | Status |
 |----------|-------|--------|
-| CRITICAL | 9 | BLOCK |
-| HIGH | 32 | WARN |
-| MEDIUM | 24 | INFO |
-| LOW | 20 | NOTE |
+| CRITICAL | 6 | BLOCK |
+| HIGH | 11 | WARN |
+| MEDIUM | 10 | INFO |
+| LOW | 8 | NOTE |
+| **Total** | **35** | |
+
+**Verdict: BLOCK — 6 CRITICAL issues must be resolved before merge.**
+
+### Top 5 highest-impact fixes
+
+1. **C1** — Broken transactions in `buttonrole.js` (data corruption risk)
+2. **C2** — Missing auth on ticket add/remove (privilege escalation)
+3. **C3** — Unhandled DB errors after mod actions (stuck interactions + missing records)
+4. **H2** — Transcript channel never used (bug — wrong SELECT columns)
+5. **H5** — Fire-and-forget unbans (permanent bans from failed auto-unban)
 
 ---
 
-## CRITICAL Issues
+## CRITICAL (6) — Must fix before merge
 
-### 1. Weak default database password
+### C1: Broken transaction pattern in buttonrole.js
 
-**Files:** `.env.example:7-8`, `docker-compose.yml:8`
+**File:** `src/commands/roles/buttonrole.js:100-112`
 
-The compose file uses `${POSTGRES_PASSWORD:-keepa}` — if the env var is missing, the DB starts with a known credential. The example file ships a working connection string with password `keepa`.
-
-```yaml
-# BAD
-POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-keepa}
-
-# FIX — fail-fast if unset
-POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-```
-
-```bash
-# .env.example — use placeholder
-DATABASE_URL=postgresql://keepa:CHANGE_ME@localhost:5432/keepa
-POSTGRES_PASSWORD=CHANGE_ME
-```
-
----
-
-### 2. No `.dockerignore` — secrets enter Docker build context
-
-**File:** `Dockerfile`
-
-No `.dockerignore` exists. The prior commit had `COPY .env .env` directly in the Dockerfile. Without `.dockerignore`, `.env`, `node_modules/`, and `.git/` are sent to the Docker daemon on every build.
-
-**Fix:** Create `.dockerignore`:
-
-```
-.env
-*.env
-logs/
-data/
-node_modules/
-*.db
-.git/
-```
-
----
-
-### 3. DM sent before action succeeds
-
-**Files:** `src/commands/moderation/ban.js:35-37`, `src/commands/moderation/kick.js:22`
-
-The user receives "you were banned/kicked" via DM before the ban/kick API call is made. If the API call fails, the user got a false notification.
-
-**Fix:** Move DM after the action succeeds:
+`query()` calls `pool.query()` which uses arbitrary pool connections. `BEGIN`/`COMMIT`/`ROLLBACK` execute on different connections, providing zero atomicity. Partial inserts persist on failure, and the user receives a false success reply.
 
 ```js
-await interaction.guild.members.ban(user, { ... }); // action first
-try { await user.send(`You have been banned...`); } catch {} // DM after
-```
-
----
-
-### 4. No try/catch on Discord API moderation actions
-
-**Files:** `src/commands/moderation/ban.js:39`, `kick.js:23`, `mute.js:30`
-
-If `guild.members.ban()` / `.kick()` / `.timeout()` throws (missing permission, network error), the rejection is unhandled. The infraction is never recorded, and the moderator gets a generic "something went wrong" error.
-
-**Fix:** Wrap the action in try/catch with a specific error reply:
-
-```js
+// BROKEN — each query() goes to a different pool connection
+const client = await query('BEGIN');
 try {
-  await interaction.guild.members.ban(user, { reason, deleteMessageSeconds: deleteMessages * 86400 });
+  for (const btn of buttons) {
+    await query('INSERT INTO component_roles ...');
+  }
+  await query('COMMIT');
 } catch (err) {
-  return interaction.reply({ embeds: [errorEmbed('Ban Failed', 'Could not ban that user.')], ephemeral: true });
+  await query('ROLLBACK');
+}
+```
+
+**Fix:** Acquire a dedicated `pool.connect()` client for transactions, or add a `withTransaction(fn)` helper to `db.js`:
+
+```js
+const pgClient = await pool.connect();
+try {
+  await pgClient.query('BEGIN');
+  for (const btn of buttons) {
+    await pgClient.query('INSERT INTO component_roles ...', [...]);
+  }
+  await pgClient.query('COMMIT');
+} catch (err) {
+  await pgClient.query('ROLLBACK');
+  logger.error(`Button role DB error: ${err.message}`);
+  return interaction.reply({
+    embeds: [errorEmbed('DB Error', 'Panel was posted but roles could not be saved.')],
+    ephemeral: true
+  });
+} finally {
+  pgClient.release();
 }
 ```
 
 ---
 
-### 5. XSS in HTML transcript — unescaped attachment URLs
+### C2: Missing authorization on `/ticket add` and `/ticket remove`
 
-**File:** `src/handlers/ticketHandler.js:133`
+**File:** `src/commands/tickets/ticket.js:49-68`
 
-`escapeHtml` is applied to `author` and `content`, but attachment URLs and names are injected raw into the HTML. An attacker can craft a filename containing `<script>` tags.
+`isOwner`, `hasManageChannels`, and `hasSupportRole` are computed but only enforced for the `assign` sub-command. Any ticket participant can add/remove arbitrary users — privilege escalation within Discord channel permissions.
 
-```js
-// BAD
-const attachments = m.attachments.map(a => `<a href="${a.url}">${a.name}</a>`).join(' ');
-
-// FIX
-const attachments = m.attachments
-  .map(a => `<a href="${escapeHtml(a.url)}">${escapeHtml(a.name)}</a>`)
-  .join(' ');
-```
-
----
-
-### 6. Untrusted `action` value from DB used without validation
-
-**File:** `src/handlers/automodHandler.js:113-134`
-
-The `action` string is read from the `filter_words` table and dispatched via string comparison. No `CHECK` constraint exists on the column. An unrecognised action silently deletes the message without logging.
-
-**Fix:**
+**Fix:** Add the permission guard to `add` and `remove`:
 
 ```js
-const VALID_ACTIONS = new Set(['delete', 'warn', 'mute', 'kick', 'ban']);
-
-async function executeAction(message, action, reason, config, client) {
-  if (!VALID_ACTIONS.has(action)) {
-    logger.warn(`Unknown automod action "${action}" — defaulting to delete`);
-    action = 'delete';
+if (sub === 'add') {
+  if (!isOwner && !hasManageChannels && !hasSupportRole) {
+    return interaction.reply({
+      embeds: [errorEmbed('No Permission', 'Only the ticket owner or staff can add users.')],
+      ephemeral: true
+    });
   }
   // ...
 }
 ```
 
-Also add a DB constraint in `schema.sql`:
-
-```sql
-action TEXT DEFAULT 'delete' CHECK (action IN ('delete','warn','mute','kick','ban'))
-```
-
 ---
 
-### 7. Internal DB error message leaked to users
+### C3: Unhandled DB rejection after Discord action
 
-**File:** `src/commands/management/tempchannel.js:47`
+**Files:** `src/commands/moderation/ban.js:55`, `kick.js:37`, `mute.js:46`, `warn.js:26`
 
-The catch block sends `err.message` directly in a Discord embed. Database errors can expose table names, column names, and connection details.
+The `await query(INSERT ...)` call after the Discord action (ban/kick/mute/warn) is not wrapped in try/catch. If the query fails, the Discord action has already executed but no infraction record exists and no reply is sent — the moderator sees a stuck "thinking..." spinner.
+
+**Fix:** Wrap the infraction insert in try/catch with a partial-success reply:
 
 ```js
-// BAD
+let caseId = '?';
+try {
+  const result = await query('INSERT INTO infractions ...', [...]);
+  caseId = result.rows[0].id;
 } catch (err) {
-  return interaction.reply({ embeds: [errorEmbed('Error', err.message)], ephemeral: true });
-}
-
-// FIX
-} catch (err) {
-  logger.error(`tempchannel setup error: ${err.stack}`);
-  return interaction.reply({ embeds: [errorEmbed('Error', 'Could not set the hub channel. Please try again.')], ephemeral: true });
+  logger.error(`Failed to record infraction for ${user.id}: ${err.message}`);
+  return interaction.reply({
+    embeds: [errorEmbed('Partial Failure', 'User was actioned but the infraction could not be recorded (DB error).')],
+    ephemeral: true,
+  });
 }
 ```
 
 ---
 
-### 8. Silent `.catch(() => {})` across all event handlers
+### C4: TOCTOU race condition in delinfraction.js
 
-**Files:** All event handler files in `src/events/`
+**File:** `src/commands/moderation/delinfraction.js:15-19`
 
-Every `channel.send(...)` and `logCh.send(...)` call uses `.catch(() => {})` — completely discarding errors. Permission errors, rate limits, and deleted channels all silently disappear.
+SELECT checks `active = 1` but the subsequent UPDATE does not re-check it. Between the two queries, another moderator could deactivate the same infraction.
+
+**Fix:** Collapse to a single atomic UPDATE and check rowCount:
+
+```js
+const { rowCount } = await query(
+  'UPDATE infractions SET active = 0, deleted_by = $1 WHERE id = $2 AND guild_id = $3 AND active = 1',
+  [interaction.user.id, caseId, interaction.guildId]
+);
+if (rowCount === 0) {
+  return interaction.reply({
+    embeds: [errorEmbed('Not Found', `Case #${caseId} not found or already deleted.`)],
+    ephemeral: true
+  });
+}
+```
+
+---
+
+### C5: Functional default password in .env.example
+
+**File:** `.env.example:7-8`
+
+`CHANGE_ME` creates a working but insecure deployment if copied as-is. Docker Compose will initialize the database with this password and the app will connect successfully, giving no indication of misconfiguration.
+
+**Fix:** Use a non-functional placeholder and add a startup assertion:
+
+```env
+DATABASE_URL=postgresql://keepa:<your-password>@localhost:5432/keepa
+POSTGRES_PASSWORD=             # Set a strong password here
+```
+
+---
+
+### C6: Schema re-executed on every startup without migration support
+
+**File:** `src/utils/db.js:32-35`
+
+The entire `schema.sql` is sent via `pool.query()` on every boot. `CREATE TABLE IF NOT EXISTS` is safe, but new CHECK constraints won't apply to existing tables, and any non-idempotent future DDL (ALTER TABLE, CREATE INDEX) will crash the bot on second startup.
+
+**Fix:** Use a migration tool (e.g., `node-pg-migrate`) or at minimum document this as a known limitation and ensure all DDL statements are idempotent.
+
+---
+
+## HIGH (11) — Should fix before merge
+
+### H1: Automod cache never invalidated on writes
+
+**File:** `src/handlers/automodHandler.js:8-85`
+
+The `automodCache` Map caches filter rules for 60s TTL. The filter and automod command handlers write to the database but never invalidate the cache. A moderator adding an urgent word filter during a raid sees no effect for up to 60 seconds.
+
+**Fix:** Export an `invalidateAutomodCache(guildId, key?)` function and call it from write paths in `filter.js` and `automod.js`:
+
+```js
+function invalidateAutomodCache(guildId, key = null) {
+  if (key) {
+    automodCache.get(guildId)?.delete(key);
+  } else {
+    automodCache.delete(guildId);
+  }
+}
+module.exports = { runAutomod, invalidateAutomodCache };
+```
+
+---
+
+### H2: Ticket transcript channel never used (wrong SELECT columns)
+
+**File:** `src/handlers/ticketHandler.js:97`
+
+`SELECT support_roles FROM ticket_config` only fetches one column, but line 114 accesses `config.transcript_channel`, which is always `undefined`. Transcripts are never sent to the log channel.
 
 **Fix:**
 
 ```js
-// BAD
-logCh.send({ embeds: [embed] }).catch(() => {});
-
-// FIX
-logCh.send({ embeds: [embed] }).catch(err => logger.warn(`Log send failed in ${logCh.id}: ${err.message}`));
+const { rows: configRows } = await query(
+  'SELECT support_roles, transcript_channel FROM ticket_config WHERE guild_id = $1',
+  [interaction.guildId]
+);
 ```
 
 ---
 
-### 9. Raid tracker mutated in-place
+### H3: HTML-escaped URLs break attachment links in transcripts
 
-**File:** `src/events/guildMemberAdd.js:29-31`
+**File:** `src/handlers/ticketHandler.js:158`
 
-`tracker.joins.push(now)` mutates the shared Map reference directly. Violates immutability requirements.
+`escapeHtml(a.url)` converts `&` to `&amp;` inside `href` attributes. Discord CDN URLs contain `&` in query parameters, so all attachment links in transcripts are broken.
+
+**Fix:** Don't HTML-escape URLs in href attributes (they are bot-controlled, not user input):
+
+```js
+`<a href="${a.url}">${escapeHtml(a.name || 'attachment')}</a>`
+```
+
+---
+
+### H4: Process error handlers registered too late
+
+**File:** `src/index.js:26-27`
+
+`process.on('unhandledRejection')` is registered inside the async IIFE, after `await initDb()`. If `initDb()` rejects, the rejection is unhandled and the process exits with no logged error.
+
+**Fix:** Register process handlers synchronously before the async IIFE:
+
+```js
+process.on('unhandledRejection', (err) => logger.error('Unhandled rejection:', err));
+process.on('uncaughtException', (err) => logger.error('Uncaught exception:', err));
+
+(async () => {
+  await initDb();
+  // ...
+})();
+```
+
+---
+
+### H5: Fire-and-forget unban in cron job
+
+**File:** `src/cron.js:22-24`
+
+`guild.members.unban()` is not awaited. On failure, the infraction is still marked `active = 0` and the user remains permanently banned with no retry. Same pattern exists for temp role removal.
 
 **Fix:**
 
 ```js
-const existing = client.raidTracker.get(member.guild.id) ?? { joins: [] };
-const updatedJoins = [...existing.joins.filter(t => now - t < config.anti_raid_window), now];
-client.raidTracker.set(member.guild.id, { joins: updatedJoins });
+try {
+  await guild.members.unban(inf.user_id, 'Temp ban expired');
+  await query('UPDATE infractions SET active = 0 WHERE id = $1', [inf.id]);
+} catch (err) {
+  logger.warn(`Auto-unban failed for ${inf.user_id}: ${err.message}`);
+  // Do NOT mark active=0 so the next cron run retries
+}
 ```
 
 ---
 
-## HIGH Issues
+### H6: No input sanitization on `/tempchannel name`
 
-### 10. SQL column interpolation in `setGuildConfig`
+**File:** `src/commands/management/tempchannel.js:60-68`
 
-**File:** `src/utils/db.js:52`
+User-supplied channel name passed directly to `channel.setName()` without stripping control characters or validating length. The same operation in `ticket.js` and `tempChannelPanelHandler.js` correctly sanitizes.
+
+**Fix:** Apply the same sanitization: strip `[\x00-\x1F\x7F]`, trim, enforce 1-100 chars.
+
+---
+
+### H7: Floating promise in `checkPanelPermission`
+
+**File:** `src/handlers/tempChannelPanelHandler.js:53-62`
+
+`interaction.reply()` is not awaited inside the synchronous function. Causes unhandled rejection warnings in production.
+
+**Fix:** Make the function async and await the reply:
 
 ```js
-await query(`UPDATE guild_config SET ${key} = $1 WHERE guild_id = $2`, [value, guildId]);
-```
-
-The `VALID_CONFIG_COLUMNS` whitelist guards this, but the pattern is fragile. If the whitelist is ever bypassed or widened incorrectly, SQL injection becomes possible.
-
-**Fix:** Use a lookup map of pre-built query strings:
-
-```js
-const CONFIG_QUERIES = {
-  prefix: 'UPDATE guild_config SET prefix = $1 WHERE guild_id = $2',
-  mod_log_channel: 'UPDATE guild_config SET mod_log_channel = $1 WHERE guild_id = $2',
-  // ... one entry per column
-};
+async function checkPanelPermission(interaction, temp) {
+  if (!isOwner && !isAdmin && !isMod) {
+    await interaction.reply({ content: '...', ephemeral: true });
+    return false;
+  }
+  return true;
+}
 ```
 
 ---
 
-### 11. `client.login()` not awaited
+### H8: Inconsistent bot-check across mod commands
 
-**File:** `src/index.js:21`
+**Files:** `src/commands/moderation/ban.js:31` vs `kick.js:22`
 
-```js
-client.login(process.env.DISCORD_TOKEN); // Promise not awaited
-```
+Ban only blocks banning the bot itself (`user.id === client.user.id`), while kick blocks kicking any bot (`user.bot`). Inconsistent behavior across commands.
 
-If the token is invalid, the rejection is only caught by the global `unhandledRejection` handler.
-
-**Fix:** `await client.login(process.env.DISCORD_TOKEN);`
+**Fix:** Unify the approach — use `user.bot` in all commands to prevent accidental removal of integration bots.
 
 ---
 
-### 12. No startup validation for required environment variables
+### H9: Unhandled DB update after Discord action in unban/unmute
 
-**File:** `src/index.js`
+**Files:** `src/commands/moderation/unban.js:29-32`, `unmute.js:33-36`
 
-`DISCORD_TOKEN` and `DATABASE_URL` are never validated before use.
+Same pattern as C3 but for UPDATE queries. If the DB call fails after the Discord action succeeds, the infraction record stays active (stale data).
 
-**Fix:**
+**Fix:** Wrap in try/catch with a partial-success message.
+
+---
+
+### H10: Duplicated column list in getGuildConfig
+
+**File:** `src/utils/db.js:47-73`
+
+The large SELECT column list appears twice with no difference. Adding a new column requires updating both, with silent breakage if one is missed.
+
+**Fix:** Extract the column list into a constant and reuse it:
 
 ```js
-const REQUIRED_ENV = ['DISCORD_TOKEN', 'DATABASE_URL'];
-for (const key of REQUIRED_ENV) {
-  if (!process.env[key]) {
-    console.error(`Missing required environment variable: ${key}`);
-    process.exit(1);
+const GUILD_CONFIG_COLUMNS = `guild_id, prefix, mod_log_channel, ...`;
+
+async function getGuildConfig(guildId) {
+  const { rows } = await query(
+    `SELECT ${GUILD_CONFIG_COLUMNS} FROM guild_config WHERE guild_id = $1`, [guildId]
+  );
+  if (rows.length > 0) return rows[0];
+  await query('INSERT INTO guild_config (guild_id) VALUES ($1) ON CONFLICT DO NOTHING', [guildId]);
+  const result = await query(
+    `SELECT ${GUILD_CONFIG_COLUMNS} FROM guild_config WHERE guild_id = $1`, [guildId]
+  );
+  return result.rows[0];
+}
+```
+
+---
+
+### H11: Raid auto-unlock uses stale channel snapshot
+
+**File:** `src/events/guildMemberAdd.js:47-72`
+
+The `channels` collection is captured at lockdown time. Channels created during the 10-minute lockdown window are never unlocked by the setTimeout callback.
+
+**Fix:** Re-query `guild.channels.cache` at unlock time instead of closing over the snapshot:
+
+```js
+setTimeout(async () => {
+  const guild = client.guilds.cache.get(member.guild.id);
+  if (!guild) return;
+  const currentChannels = guild.channels.cache.filter(c => c.isTextBased());
+  for (const [, ch] of currentChannels) {
+    await ch.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: null, Connect: null })
+      .catch(err => logger.warn(`Raid unlock failed: ${err.message}`));
+  }
+}, 600000);
+```
+
+---
+
+## MEDIUM (10) — Should address
+
+### M1: All DB errors reported as "already exists"
+
+**Files:** `src/commands/filter/automod.js:50-55`, `filter.js:64-68`
+
+Any database error (connection lost, type mismatch) is caught and reported to the user as "already whitelisted" or "already exists". Masks real failures.
+
+**Fix:** Check `err.code === '23505'` to distinguish unique violations from other errors:
+
+```js
+} catch (err) {
+  if (err.code === '23505') {
+    added.push(`${channel} (already whitelisted)`);
+  } else {
+    logger.error(`Whitelist insert error: ${err.message}`);
+    added.push(`${channel} (error — could not add)`);
   }
 }
 ```
 
 ---
 
-### 13. No format validation on unban user ID
+### M2: Test sub-command doesn't escape markdown in username
 
-**File:** `src/commands/moderation/unban.js:15`
+**Files:** `src/commands/management/welcome.js:46-50`, `goodbye.js:47`
 
-Raw string goes directly to Discord API and DB with no format check.
+The production path in `guildMemberAdd.js` escapes the username with `escapeMarkdown()`. The test path does not, so test output differs from production.
 
-**Fix:**
-
-```js
-if (!/^\d{17,20}$/.test(userId)) {
-  return interaction.reply({ embeds: [errorEmbed('Invalid ID', 'Please provide a valid Discord user ID.')], ephemeral: true });
-}
-```
+**Fix:** Apply `escapeMarkdown()` in test paths. Extract the function to a shared utility (`src/utils/strings.js`).
 
 ---
 
-### 14. No self-action guard on moderation commands
+### M3: `{server}` template not markdown-escaped
 
-**Files:** `src/commands/moderation/warn.js`, `ban.js`, `kick.js`, `mute.js`, `unmute.js`
+**File:** `src/events/guildMemberAdd.js:95-99`
 
-A moderator can warn/ban/kick themselves or target the bot. For `warn`, there is no Discord-enforced guard.
+`member.guild.name` is user-controlled (server owners set it) but not escaped before template substitution. A guild name containing `**`, backticks, or `[text](url)` renders unexpectedly.
 
-**Fix:**
-
-```js
-if (user.id === interaction.user.id) {
-  return interaction.reply({ embeds: [errorEmbed('Invalid Target', 'You cannot use this action on yourself.')], ephemeral: true });
-}
-if (user.bot) {
-  return interaction.reply({ embeds: [errorEmbed('Invalid Target', 'You cannot use this action on a bot.')], ephemeral: true });
-}
-```
+**Fix:** Apply `escapeMarkdown()` to `member.guild.name`.
 
 ---
 
-### 15. Invalid duration silently becomes permanent ban
+### M4: `LIMIT 100` not communicated to user
 
-**File:** `src/commands/moderation/ban.js:27`
+**File:** `src/commands/moderation/infractions.js:20`
 
-`parseDuration("7days")` returns `null` (invalid format), which is treated the same as "no duration" — a permanent ban. No feedback to the moderator.
+Footer shows `Total: ${rows.length} infractions` which displays `100` when there are actually more.
 
-**Fix:**
-
-```js
-if (durationStr) {
-  const duration = parseDuration(durationStr);
-  if (duration === null) {
-    return interaction.reply({ embeds: [errorEmbed('Invalid Duration', 'Use formats like `7d`, `24h`, `30m`, or `perm`.')], ephemeral: true });
-  }
-}
-```
+**Fix:** Change footer to `Showing last ${rows.length} infractions (max 100)`.
 
 ---
 
-### 16. Ban duration can overflow INTEGER column
+### M5: No length guard on `reason` in DM embeds
 
-**File:** `src/commands/moderation/ban.js:27,42`, `src/database/schema.sql:59`
+**Files:** `src/commands/moderation/ban.js:64`, `kick.js:44`, `mute.js:53`, `warn.js:33`
 
-`expires_at` is `INTEGER` (32-bit, max 2,147,483,647). A duration like `9999w` produces a value that overflows.
+A very long reason string could push the DM over Discord's 2000-character limit, causing the send to silently fail.
 
-**Fix:** Change `expires_at` to `BIGINT` in the schema, or enforce a max duration.
-
----
-
-### 17. Unbounded `SELECT *` on infractions
-
-**File:** `src/commands/moderation/infractions.js:17-20`
-
-No `LIMIT` clause. Thousands of infractions = OOM or Discord embed overflow.
-
-**Fix:** Add `LIMIT 100` to the query.
+**Fix:** Truncate reason before embedding in DMs/embeds (e.g., max 1000 chars).
 
 ---
 
-### 18. Hard DELETE on infractions — no audit trail
+### M6: No try/catch on channel send in ticketpanel create
 
-**File:** `src/commands/moderation/delinfraction.js:19`
+**File:** `src/commands/tickets/ticketpanel.js:66`
 
-```js
-await query('DELETE FROM infractions WHERE id = $1 AND guild_id = $2', [caseId, interaction.guildId]);
-```
+If the bot lacks SendMessages permission in the target channel, the interaction times out with no user-friendly error.
 
-Permanently destroys moderation records with no soft-delete, no confirmation, and no mod log entry.
-
-**Fix:** Use `UPDATE infractions SET active = 0, deleted = 1` and log the deletion.
+**Fix:** Wrap in try/catch with an error reply.
 
 ---
 
-### 19. No permission check on `closeTicket`
-
-**File:** `src/handlers/ticketHandler.js:73-114`
-
-Any member who can see the ticket channel can close it. No check for ticket owner or support role.
-
-**Fix:** Verify the caller is the ticket owner, has support role, or has `ManageChannels`.
-
----
-
-### 20. No permission check on temp channel modal submission
-
-**File:** `src/handlers/tempChannelPanelHandler.js:176-203`
-
-`handleTempChannelButton` checks permissions, but `handleTempChannelModal` does not. The modal submission is a separate interaction path.
-
-**Fix:** Add `checkPanelPermission(interaction, temp)` at the top of `handleTempChannelModal`.
-
----
-
-### 21. All bare `catch {}` blocks in automod swallow failures silently
-
-**File:** `src/handlers/automodHandler.js:86, 116, 125, 127, 129`
-
-Mute, kick, ban, warn — all wrapped in `try {} catch {}` with no logging.
-
-**Fix:** Add `logger.warn(...)` in each catch block.
-
----
-
-### 22. Spam tracker array mutated with `.push()`
-
-**File:** `src/handlers/automodHandler.js:76-82`
-
-```js
-timestamps.push(now); // mutates cached array
-```
-
-**Fix:**
-
-```js
-const recent = [...timestamps, now].filter(t => now - t < 3000);
-client.spamTracker.set(key, recent);
-```
-
----
-
-### 23. N+1 database queries per message in automod
-
-**File:** `src/handlers/automodHandler.js:5-17, 27, 38-39`
-
-Every message triggers 3-4 DB queries (whitelist, filter words, link blacklist/whitelist). No caching.
-
-**Fix:** Add per-guild in-memory cache with 30-60s TTL.
-
----
-
-### 24. Button role style option only works for role1
-
-**File:** `src/commands/roles/buttonrole.js:42`
-
-```js
-const style = interaction.options.getString(`style${i === 1 ? '1' : ''}`) || 'primary';
-```
-
-For `i > 1`, this reads option `'style'` which doesn't exist. All buttons beyond the first silently default to Primary.
-
-**Fix:** `interaction.options.getString(\`style${i}\`)` — and register `style2`–`style5` options.
-
----
-
-### 25. Unbounded message fetch loop in transcript generation
-
-**File:** `src/handlers/ticketHandler.js:120-125`
-
-`while (true)` with no iteration cap. Thousands of messages = OOM / timeout.
-
-**Fix:** Add `MAX_BATCHES = 20` (2000 messages cap).
-
----
-
-### 26. No try/catch on `getGuildConfig` in event handlers
-
-**Files:** 12+ event handler files
-
-Every event handler calls `await getGuildConfig(...)` at the top without a try/catch. A DB blip = the entire event silently fails.
-
-**Fix:** Wrap in try/catch with early return on failure.
-
----
-
-### 27. `guildMemberAdd.execute` is 125 lines with nesting depth 5
-
-**File:** `src/events/guildMemberAdd.js:7-131`
-
-Handles 6 concerns inline: account age, anti-raid, auto-roles, welcome, member log, invite tracking.
-
-**Fix:** Extract each concern into its own function.
-
----
-
-### 28. Phishing list fetch — empty response wipes protection
-
-**File:** `src/cron.js:83-91`
-
-If the remote server returns `[]`, `client.phishingDomains` is replaced with an empty Set.
-
-**Fix:**
-
-```js
-if (domains.length === 0) {
-  logger.warn('Phishing list returned empty — retaining existing list');
-  return;
-}
-```
-
----
-
-### 29. No error handling on Discord API calls in tempchannel subcommands
-
-**File:** `src/commands/management/tempchannel.js:60-94`
-
-`channel.setName()`, `channel.setUserLimit()`, `channel.permissionOverwrites.edit()` all unwrapped.
-
-**Fix:** Wrap each in try/catch with user-facing error reply.
-
----
-
-### 30. No compensating delete if stats channel DB insert fails
-
-**File:** `src/commands/management/stats.js:34-47`
-
-If `guild.channels.create()` succeeds but the DB insert fails, a dangling channel exists with no tracking.
-
-**Fix:** Delete the channel in the catch block.
-
----
-
-### 31. No error handling on `channel.send()` in buttonrole
-
-**File:** `src/commands/roles/buttonrole.js:78-87`
-
-Unhandled rejection if bot lacks permission to send in the target channel. Also, DB inserts are sequential with no transaction — partial failure = corrupt panel state.
-
-**Fix:** Wrap in try/catch; use a transaction for DB inserts.
-
----
-
-### 32. Button role interaction has no user feedback on error
-
-**File:** `src/events/interactionCreate.js:95-97`
-
-When `member.roles.add/remove` throws, the interaction is left pending with no reply.
-
-**Fix:**
-
-```js
-} catch (err) {
-  logger.error(`Button role error: ${err.stack}`);
-  await interaction.reply({ content: 'Failed to update your role.', ephemeral: true }).catch(() => {});
-}
-```
-
----
-
-### 33. No error handling on Discord API calls in ticket.js
-
-**File:** `src/commands/tickets/ticket.js:38,44,51`
-
-`interaction.channel.permissionOverwrites.edit()` and `.delete()` are unwrapped.
-
----
-
-### 34. Ticket channel rename has no validation
-
-**File:** `src/commands/tickets/ticket.js:56-58`
-
-No length or character validation before `channel.setName()`.
-
----
-
-### 35. Unvalidated welcome/goodbye message length
-
-**Files:** `src/commands/management/welcome.js:24-26`, `goodbye.js:19`
-
-No `setMaxLength()` on the option. A message exceeding Discord's 4096-char embed limit crashes the handler on every member join.
-
-**Fix:** Add `.setMaxLength(1800)` to the command option.
-
----
-
-### 36. `JSON.parse(config.auto_roles)` with no error handling
-
-**File:** `src/events/guildMemberAdd.js:66`
-
-Malformed JSON from DB = uncaught exception that terminates the entire `execute()`, skipping welcome message, member log, and invite tracking.
-
-**Fix:** Wrap in try/catch with a safe default.
-
----
-
-### 37. `guildMemberAdd.js` — `setTimeout` for raid unlock is not persisted
-
-**File:** `src/events/guildMemberAdd.js:55-59`
-
-The timeout reference is never stored. If the bot restarts within 10 minutes of a raid, channels are never unlocked.
-
-**Fix:** Persist the unlock time to DB and handle in cron.
-
----
-
-### 38. No pool error handler
-
-**File:** `src/utils/db.js:6, 23`
-
-The `pg` Pool emits `error` on idle client failures. Without a listener, Node throws an uncaught exception.
-
-**Fix:** `pool.on('error', (err) => logger.error('Pool error:', err));`
-
----
-
-### 39. `undici` vulnerability (transitive via discord.js)
-
-**File:** `package.json`
-
-`undici < 6.23.0` — unbounded decompression chain can cause DoS.
-
-**Fix:** Add override: `"overrides": { "undici": ">=6.23.0" }`
-
----
-
-### 40. Temp channel name not sanitized
-
-**File:** `src/handlers/tempChannelPanelHandler.js:186-190`
-
-Only checks `if (!name)`. No control character stripping or length enforcement.
-
-**Fix:**
-
-```js
-const name = interaction.fields.getTextInputValue('name').trim().replace(/[\x00-\x1F\x7F]/g, '');
-if (!name || name.length > 100) {
-  return interaction.reply({ content: 'Invalid channel name.', ephemeral: true });
-}
-```
-
----
-
-### 41. Cron unbounded `SELECT *` queries
-
-**File:** `src/cron.js:11, 32, 50`
-
-Full table scans every minute with no `LIMIT` or column filtering.
-
----
-
-## MEDIUM Issues
-
-### 42. Moderate logging race condition in mod commands
-
-**Files:** All moderation commands
-
-`getGuildConfig` after `interaction.reply()` — if it throws, the global handler tries to reply on an already-replied interaction.
-
-**Fix:** Wrap the entire post-reply logging block in an IIFE with try/catch.
-
----
-
-### 43. `SELECT *` used for guild config
-
-**File:** `src/utils/db.js:40, 43`
-
-Fetches all columns. Any future sensitive column is automatically exposed.
-
-**Fix:** Use explicit column lists.
-
----
-
-### 44. Schema runs on every startup — no migration system
-
-**File:** `src/utils/db.js:25-28`
-
-`CREATE TABLE IF NOT EXISTS` is idempotent, but there's no mechanism for schema evolution (ALTER TABLE, new columns). Consider `node-pg-migrate`.
-
----
-
-### 45. PostgreSQL port exposed to all interfaces
-
-**File:** `docker-compose.yml:13`
-
-```yaml
-ports:
-  - "5433:5432"  # binds to 0.0.0.0
-```
-
-**Fix:** `"127.0.0.1:5433:5432"` or remove entirely.
-
----
-
-### 46. `fs.readFileSync` inside async function
-
-**File:** `src/utils/db.js:25-27`
-
-Blocks the event loop during startup. Use `fs.promises.readFile` instead.
-
----
-
-### 47. Filter list has no row limit
-
-**File:** `src/commands/filter/filter.js:77-78`
-
-`SELECT *` with no `LIMIT` on filter_words and filter_links.
-
----
-
-### 48. Automod threshold validation missing
-
-**File:** `src/commands/filter/automod.js:123-128`
-
-Caps/spam threshold accepts any integer. Setting to 0 or 1 = every message triggers.
-
-**Fix:** Add `.setMinValue(1).setMaxValue(100)` to the option.
-
----
-
-### 49. Transcript attachment links expire
-
-**File:** `src/handlers/ticketHandler.js:137-141`
-
-Attachment links point to `cdn.discordapp.com` which expire. Transcripts are not reliable permanent records.
-
----
-
-### 50. Temp channel name template not validated at config time
-
-**File:** `src/handlers/tempChannelHandler.js:17`
-
-`hub.channel_name` from DB may contain invalid channel name characters. Validated at join time (too late), not at config time.
-
----
-
-### 51. Invitation stats are public
-
-**File:** `src/commands/management/invites.js:9-10`
-
-`permissions: []` — any member can query any member's invite data.
-
----
-
-### 52. `parseInt` without radix and NaN guard
-
-**File:** `src/commands/management/invites.js:20`
-
-**Fix:** `parseInt(r.count, 10) || 0`
-
----
-
-### 53. Reaction role message ID not validated
-
-**File:** `src/commands/roles/reactionrole.js:22`
-
-Free-text string goes directly to `channel.messages.fetch()` with no format check.
-
----
-
-### 54. `voiceStateUpdate` handlers not error-bounded
-
-**File:** `src/events/voiceStateUpdate.js:9-10`
-
-If `handleVoiceJoin` throws, voice logging is never reached.
-
----
-
-### 55. `SELECT *` on reaction_roles when only `role_id` needed
-
-**Files:** `src/events/messageReactionAdd.js:10`, `messageReactionRemove.js:10`
-
----
-
-### 56. Raid auto-unlock via `setTimeout` not persisted
-
-**File:** `src/events/guildMemberAdd.js:55-59`
-
-Covered under HIGH #37. The timeout is also not cancellable.
-
----
-
-### 57. Two separate cron schedules instead of one
-
-**File:** `src/cron.js:8, 29`
-
-Two `cron.schedule('* * * * *', ...)` jobs. Merge into one.
-
----
-
-### 58. Runtime `require()` inside conditionals
-
-**File:** `src/events/interactionCreate.js:40, 51`
-
-Move to top of file for clear dependency graph.
-
----
-
-### 59. Partial user object in `guildMemberRemove`
-
-**File:** `src/events/guildMemberRemove.js:14`
-
-`member.user` can be partial. Use optional chaining like `messageDelete.js` does.
-
----
-
-### 60. Ticket `close` has no authorization check (command level)
-
-**File:** `src/commands/tickets/ticket.js:26-29`
-
-Any user in the channel can run `/ticket close`. Related to HIGH #19.
-
----
-
-### 61. Mutation in autorole and ticketpanel
-
-**Files:** `src/commands/management/autorole.js:32,41`, `src/commands/tickets/ticketpanel.js:36`
-
-`roles.push()` and `roles.splice()` mutate the parsed array. Use spread/filter instead.
-
----
-
-### 62. Transcript `messages.reverse()` mutates array
-
-**File:** `src/handlers/ticketHandler.js:127`
-
-Use `[...messages].reverse()` or `.toReversed()`.
-
----
-
-### 63. Automod toggle verb assumes "enable"/"disable" ending
-
-**File:** `src/commands/filter/automod.js:131`
-
-Works today but fragile. Document or compute explicitly.
-
----
-
-### 64. Temp channel modal member fetch without deferring
-
-**File:** `src/handlers/tempChannelPanelHandler.js:216`
-
-`guild.members.fetch()` is a network call. The 3-second interaction window can expire.
-
-**Fix:** `await interaction.deferReply({ ephemeral: true })` before the fetch.
-
----
-
-### 65. `goodbye_enabled` column missing from schema
+### M7: INTEGER for boolean columns in PostgreSQL schema
 
 **File:** `src/database/schema.sql`
 
-`welcome_enabled` exists but there's no `goodbye_enabled` flag.
+Columns like `welcome_enabled INTEGER DEFAULT 1` use SQLite conventions. PostgreSQL has native BOOLEAN. Using INTEGER is fragile and will cause type coercion issues over time.
 
 ---
 
-## LOW Issues
+### M8: In-memory caches never pruned
 
-### 66. `created_at` timestamp type inconsistency
+**Files:** `src/handlers/automodHandler.js:8`, `client.spamTracker`
 
-**File:** `src/database/schema.sql`
-
-Some tables use `BIGINT`, others use `INTEGER` for timestamps. `INTEGER` caps at 2038.
+Guilds that leave retain entries permanently in memory. Add eviction on `guildDelete` event.
 
 ---
 
-### 67. Empty catch blocks undocumented
+### M9: Raid tracker reset allows duplicate lockdown timers
 
-**Files:** All moderation commands
+**File:** `src/events/guildMemberAdd.js:74`
 
-`try { await user.send(...); } catch {}` — correct behavior but no comment explaining why.
-
----
-
-### 68. `created_at` assumed to be Unix seconds
-
-**File:** `src/commands/moderation/infractions.js:32`
-
-Works correctly, but no comment documenting the expected unit.
+After raid lockdown triggers, the tracker resets to empty. A second wave of rapid joins triggers a duplicate lockdown and schedules overlapping unlock timers that race against each other.
 
 ---
 
-### 69. Hard-coded product name in embeds
+### M10: `user.tag` deprecated in discord.js v14
 
-**File:** `src/commands/moderation/infractions.js:41`
+**File:** `src/commands/moderation/unban.js:34`
 
-`Keepa` duplicated across the codebase. Extract to a constant.
+Fallback object manually sets `tag` property. `.tag` is deprecated in discord.js v14; use `.username` consistently.
 
----
+**Fix:** Remove the manual `tag` field from the fallback object:
 
-### 70. Unused `client` parameter
-
-**Files:** `src/events/channelCreate.js:6`, `channelDelete.js:6`
-
----
-
-### 71. `EmbedBuilder.addFields()` mutation
-
-**Files:** `src/events/guildMemberUpdate.js:24-25`, `guildMemberRemove.js`
-
-Discord.js API requires mutation — acceptable but noted.
+```js
+const user = await client.users.fetch(userId).catch(() => ({ id: userId, username: userId }));
+```
 
 ---
 
-### 72. `axios` only used for phishing refresh
+## LOW (8) — Nice to fix
 
-**File:** `src/cron.js:2`
+### L1: `BOT_NAME` constant exported but never imported
 
-Consider extracting to `src/utils/phishingList.js`.
+**File:** `src/utils/constants.js`
 
----
-
-### 73. Welcome message template doesn't escape markdown
-
-**File:** `src/events/guildMemberAdd.js:76-80`
-
-Usernames with `*`, `_`, `~` cause unintended formatting.
+The string `'Keepa'` is still hardcoded across many files in embed footers. Either integrate the constant everywhere or remove the file.
 
 ---
 
-### 74. Filter link domain not format-validated
+### L2: `filter_links.mode` missing CHECK constraint
 
-**File:** `src/commands/filter/filter.js:40-43`
+**File:** `src/database/schema.sql:44-50`
 
-**Fix:** `if (!/^[a-z0-9.-]{1,253}$/.test(domain)) return error;`
+No constraint on `mode TEXT DEFAULT 'blacklist'`. An invalid value could be inserted via a bug.
 
----
-
-### 75. `automod.js` — no guard when subcommand not in map
-
-**File:** `src/commands/filter/automod.js:120-121`
-
-`entry` is `undefined` if `sub` is not in the map. Throws `TypeError`.
+**Fix:** Add `CHECK (mode IN ('blacklist', 'whitelist'))`.
 
 ---
 
-### 76. No `.dockerignore` also slows builds
+### L3: `automod_whitelist.type` missing CHECK constraint
+
+**File:** `src/database/schema.sql:155-161`
+
+`type TEXT NOT NULL` has no CHECK constraint. Application handles unknown types silently but DB should enforce validity.
+
+**Fix:** Add `CHECK (type IN ('channel', 'role'))`.
+
+---
+
+### L4: Dockerfile runs as root
 
 **File:** `Dockerfile`
 
-`node_modules/` and `.git/` enter the build context unnecessarily.
+Best practice for Node.js containers is to run as a non-root user.
+
+**Fix:**
+
+```dockerfile
+RUN addgroup -S keepa && adduser -S keepa -G keepa
+USER keepa
+```
 
 ---
 
-### 77. `stats.js` uses `guild.members.cache` without ensuring cache is populated
+### L5: No logger import in delinfraction.js
 
-**File:** `src/commands/management/stats.js:27-28`
+**File:** `src/commands/moderation/delinfraction.js`
 
-Partial cache = undercounted online/bot members.
+DB errors silently swallowed with no contextual logging.
 
----
-
-### 78. `goodbye.js` has no toggle/test subcommand
-
-**File:** `src/commands/management/goodbye.js`
-
-`welcome.js` has `toggle` and `test`. `goodbye.js` only has `set`.
+**Fix:** Add `const logger = require('../../utils/logger');` and wrap queries in try/catch.
 
 ---
 
-### 79. `ticketpanel.js` uses `enabled = 1` (integer)
+### L6: `escapeMarkdown()` defined locally but needed in 3 files
 
-**File:** `src/commands/tickets/ticketpanel.js:43`
+**File:** `src/events/guildMemberAdd.js:7-9`
 
-PostgreSQL has no native boolean. Document the integer convention.
-
----
-
-### 80. Magic numbers across codebase
-
-**Files:** `src/commands/roles/temprole.js:36`, `src/handlers/ticketHandler.js:113`
-
-`Math.floor(Date.now() / 1000)` repeated. `5000` (delete delay) unexplained.
-
-**Fix:** Extract `nowUnixSeconds()` helper and named constants.
+Also needed in `welcome.js` and `goodbye.js`. Extract to `src/utils/strings.js` for reuse.
 
 ---
 
-### 81. Moderate `undici` vulnerability details
+### L7: `SELECT *` still used for some tables
 
-**File:** `package.json`
+**Files:** `tempChannelPanelHandler.js:78`, `tempChannelHandler.js:8`, `ticketHandler.js:10`, `ticket.js:33`
 
-GHSA-g9mf-h72j-4rw9: unbounded decompression chain in HTTP responses (DoS). Transitive via `discord.js`.
-
----
-
-### 82. Automod `entry` undefined guard
-
-**File:** `src/commands/filter/automod.js:120-121`
-
-If `sub` doesn't match the map, `entry.key` throws TypeError.
+Fragile — adding a column silently changes what the application receives. Use column-specific selects.
 
 ---
 
-### 83. Filter link domain validation
+### L8: Emoji in infraction output
 
-**File:** `src/commands/filter/filter.js:40-43`
+**File:** `src/commands/moderation/infractions.js:35`
 
-Lowercased but not validated as an actual domain format.
-
----
-
-### 84. `require()` at module scope vs conditional
-
-**File:** `src/events/interactionCreate.js:40, 51`
-
-Node caches `require()`, but conditional placement makes dependencies hard to trace.
-
----
-
-### 85. Transcript `messages` variable reassignment style
-
-**File:** `src/handlers/ticketHandler.js:123`
-
-`let messages` reassigned in a loop. Use `const` with `push` for consistency.
-
----
-
-## Priority Fix Order
-
-1. Create `.dockerignore`
-2. Remove default password from `docker-compose.yml`
-3. Reorder DM/action in ban/kick commands
-4. Wrap Discord API calls in try/catch across all commands
-5. Escape attachment URLs in transcript HTML
-6. Validate automod action at point of use + DB CHECK constraint
-7. Replace empty `.catch(() => {})` with `.catch(err => logger.warn(...))`
-8. Add env var validation at startup
-9. Add permission checks to `closeTicket` and `handleTempChannelModal`
-10. Add caching for automod DB queries
+Uses `🟢`/`🔴` which is inconsistent with no-emoji coding style policy. Replace with text labels (`Active`/`Inactive`).

@@ -19,9 +19,13 @@ function startCronJobs(client) {
       for (const inf of expiredBans) {
         const guild = client.guilds.cache.get(inf.guild_id);
         if (!guild) continue;
-        guild.members.unban(inf.user_id, 'Temp ban expired').catch(() => {});
-        await query('UPDATE infractions SET active = 0 WHERE id = $1', [inf.id]);
-        logger.info(`Auto-unbanned ${inf.user_id} in ${inf.guild_id}`);
+        try {
+          await guild.members.unban(inf.user_id, 'Temp ban expired');
+          await query('UPDATE infractions SET active = 0 WHERE id = $1', [inf.id]);
+          logger.info(`Auto-unbanned ${inf.user_id} in ${inf.guild_id}`);
+        } catch (err) {
+          logger.warn(`Auto-unban failed for ${inf.user_id}: ${err.message}`);
+        }
       }
     } catch (err) {
       logger.error(`Expired bans cron error: ${err.message}`);
@@ -37,10 +41,14 @@ function startCronJobs(client) {
       for (const tr of expiredRoles) {
         const guild = client.guilds.cache.get(tr.guild_id);
         if (!guild) continue;
-        const member = guild.members.cache.get(tr.user_id);
-        if (member) member.roles.remove(tr.role_id).catch(() => {});
-        await query('DELETE FROM temp_roles WHERE id = $1', [tr.id]);
-        logger.info(`Removed temp role ${tr.role_id} from ${tr.user_id} in ${tr.guild_id}`);
+        try {
+          const member = guild.members.cache.get(tr.user_id);
+          if (member) await member.roles.remove(tr.role_id);
+          await query('DELETE FROM temp_roles WHERE id = $1', [tr.id]);
+          logger.info(`Removed temp role ${tr.role_id} from ${tr.user_id} in ${tr.guild_id}`);
+        } catch (err) {
+          logger.warn(`Temp role removal failed for ${tr.user_id}: ${err.message}`);
+        }
       }
     } catch (err) {
       logger.error(`Expired temp roles cron error: ${err.message}`);

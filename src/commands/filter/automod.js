@@ -1,6 +1,8 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const { successEmbed, errorEmbed, Colors } = require('../../utils/embeds');
 const { setGuildConfig, query } = require('../../utils/db');
+const { invalidateAutomodCache } = require('../../handlers/automodHandler');
+const logger = require('../../utils/logger');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -50,19 +52,30 @@ module.exports = {
         try {
           await query('INSERT INTO automod_whitelist (guild_id, type, target_id) VALUES ($1, $2, $3)', [interaction.guildId, 'channel', channel.id]);
           added.push(`${channel}`);
-        } catch {
-          added.push(`${channel} (already whitelisted)`);
+        } catch (err) {
+          if (err.code === '23505') {
+            added.push(`${channel} (already whitelisted)`);
+          } else {
+            logger.error(`Whitelist insert error: ${err.message}`);
+            added.push(`${channel} (error — could not add)`);
+          }
         }
       }
       if (role) {
         try {
           await query('INSERT INTO automod_whitelist (guild_id, type, target_id) VALUES ($1, $2, $3)', [interaction.guildId, 'role', role.id]);
           added.push(`${role}`);
-        } catch {
-          added.push(`${role} (already whitelisted)`);
+        } catch (err) {
+          if (err.code === '23505') {
+            added.push(`${role} (already whitelisted)`);
+          } else {
+            logger.error(`Whitelist insert error: ${err.message}`);
+            added.push(`${role} (error — could not add)`);
+          }
         }
       }
 
+      invalidateAutomodCache(interaction.guildId, 'whitelist');
       return interaction.reply({ embeds: [successEmbed('Whitelist Updated', added.join('\n'))], ephemeral: true });
     }
 
@@ -84,6 +97,7 @@ module.exports = {
         removed.push(result.rowCount > 0 ? `${role} removed` : `${role} was not whitelisted`);
       }
 
+      invalidateAutomodCache(interaction.guildId, 'whitelist');
       return interaction.reply({ embeds: [successEmbed('Whitelist Updated', removed.join('\n'))], ephemeral: true });
     }
 
@@ -121,6 +135,7 @@ module.exports = {
     if (!entry) return interaction.reply({ embeds: [errorEmbed('Error', 'Unknown automod setting.')], ephemeral: true });
 
     await setGuildConfig(interaction.guildId, entry.key, enabled);
+    invalidateAutomodCache(interaction.guildId);
 
     const threshold = interaction.options.getInteger('threshold');
     let extra = '';

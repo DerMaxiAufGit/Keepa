@@ -32,7 +32,7 @@ module.exports = {
       const chunk = rows.slice(i, i + perPage);
       const desc = chunk.map(r => {
         const date = new Date(r.created_at * 1000).toLocaleDateString();
-        return `**#${r.id}** | ${r.type.toUpperCase()} | ${r.active ? '🟢' : '🔴'}\n> ${r.reason || 'No reason'}\n> Mod: <@${r.moderator_id}> | ${date}`;
+        return `**#${r.id}** | ${r.type.toUpperCase()} | ${r.active ? 'Active' : 'Inactive'}\n> ${r.reason || 'No reason'}\n> Mod: <@${r.moderator_id}> | ${date}`;
       }).join('\n\n');
 
       pages.push(
@@ -40,7 +40,7 @@ module.exports = {
           .setColor(Colors.INFO)
           .setTitle(`Infractions for ${user.tag || user.username}`)
           .setDescription(desc)
-          .setFooter({ text: `Total: ${rows.length} infractions | ${BOT_NAME}` })
+          .setFooter({ text: `Showing last ${rows.length} infractions (max 100) | ${BOT_NAME}` })
           .setTimestamp()
       );
     }

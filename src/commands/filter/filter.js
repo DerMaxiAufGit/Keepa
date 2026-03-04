@@ -2,6 +2,8 @@ const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const { successEmbed, errorEmbed, Colors } = require('../../utils/embeds');
 const { query } = require('../../utils/db');
 const { paginate } = require('../../utils/paginator');
+const { invalidateAutomodCache } = require('../../handlers/automodHandler');
+const logger = require('../../utils/logger');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -45,15 +47,21 @@ module.exports = {
         }
         try {
           await query('INSERT INTO filter_links (guild_id, domain, mode) VALUES ($1, $2, $3)', [interaction.guildId, domain, mode]);
+          invalidateAutomodCache(interaction.guildId, mode === 'blacklist' ? 'filter_links_black' : 'filter_links_white');
           return interaction.reply({ embeds: [successEmbed('Link Filter Added', `\`${domain}\` added to **${mode}**.`)], ephemeral: true });
-        } catch {
-          return interaction.reply({ embeds: [errorEmbed('Already Exists', 'This domain is already filtered.')], ephemeral: true });
+        } catch (err) {
+          if (err.code === '23505') {
+            return interaction.reply({ embeds: [errorEmbed('Already Exists', 'This domain is already filtered.')], ephemeral: true });
+          }
+          logger.error(`Link filter insert error: ${err.message}`);
+          return interaction.reply({ embeds: [errorEmbed('Error', 'Could not add the filter (DB error).')], ephemeral: true });
         }
       }
       if (sub === 'remove') {
         const domain = interaction.options.getString('domain').toLowerCase();
         const result = await query('DELETE FROM filter_links WHERE guild_id = $1 AND domain = $2', [interaction.guildId, domain]);
         if (result.rowCount === 0) return interaction.reply({ embeds: [errorEmbed('Not Found', 'Domain not in filters.')], ephemeral: true });
+        invalidateAutomodCache(interaction.guildId);
         return interaction.reply({ embeds: [successEmbed('Link Filter Removed', `\`${domain}\` removed.`)], ephemeral: true });
       }
     }
@@ -63,9 +71,14 @@ module.exports = {
       const action = interaction.options.getString('action') || 'delete';
       try {
         await query('INSERT INTO filter_words (guild_id, word, action) VALUES ($1, $2, $3)', [interaction.guildId, word, action]);
+        invalidateAutomodCache(interaction.guildId, 'filter_words');
         return interaction.reply({ embeds: [successEmbed('Word Filter Added', `\`${word}\` → **${action}**`)], ephemeral: true });
-      } catch {
-        return interaction.reply({ embeds: [errorEmbed('Already Exists', 'This word is already filtered.')], ephemeral: true });
+      } catch (err) {
+        if (err.code === '23505') {
+          return interaction.reply({ embeds: [errorEmbed('Already Exists', 'This word is already filtered.')], ephemeral: true });
+        }
+        logger.error(`Word filter insert error: ${err.message}`);
+        return interaction.reply({ embeds: [errorEmbed('Error', 'Could not add the filter (DB error).')], ephemeral: true });
       }
     }
 
@@ -73,6 +86,7 @@ module.exports = {
       const word = interaction.options.getString('word').toLowerCase();
       const result = await query('DELETE FROM filter_words WHERE guild_id = $1 AND word = $2', [interaction.guildId, word]);
       if (result.rowCount === 0) return interaction.reply({ embeds: [errorEmbed('Not Found', 'Word not in filters.')], ephemeral: true });
+      invalidateAutomodCache(interaction.guildId, 'filter_words');
       return interaction.reply({ embeds: [successEmbed('Word Filter Removed', `\`${word}\` removed.`)], ephemeral: true });
     }
 

@@ -7,7 +7,7 @@ const logger = require('../utils/logger');
 const MAX_TRANSCRIPT_BATCHES = 20;
 
 async function createTicket(interaction, client) {
-  const { rows: configRows } = await query('SELECT * FROM ticket_config WHERE guild_id = $1', [interaction.guildId]);
+  const { rows: configRows } = await query('SELECT guild_id, enabled, category_id, log_channel, support_roles, max_open, transcript_channel FROM ticket_config WHERE guild_id = $1', [interaction.guildId]);
   const config = configRows[0];
 
   if (!config || !config.enabled) {
@@ -80,7 +80,7 @@ async function createTicket(interaction, client) {
 
 async function closeTicket(interaction, client, reason) {
   const { rows: ticketRows } = await query(
-    "SELECT * FROM tickets WHERE channel_id = $1 AND status = 'open'",
+    "SELECT id, guild_id, channel_id, user_id, assigned_to, status FROM tickets WHERE channel_id = $1 AND status = 'open'",
     [interaction.channelId]
   );
   const ticket = ticketRows[0];
@@ -94,7 +94,7 @@ async function closeTicket(interaction, client, reason) {
   const hasManageChannels = interaction.member.permissions.has(PermissionsBitField.Flags.ManageChannels);
 
   let hasSupportRole = false;
-  const { rows: configRows } = await query('SELECT support_roles FROM ticket_config WHERE guild_id = $1', [interaction.guildId]);
+  const { rows: configRows } = await query('SELECT support_roles, transcript_channel FROM ticket_config WHERE guild_id = $1', [interaction.guildId]);
   if (configRows[0]) {
     let supportRoles = [];
     try { supportRoles = JSON.parse(configRows[0].support_roles || '[]'); } catch {}
@@ -155,7 +155,7 @@ async function generateTranscript(channel, ticket) {
     const time = new Date(m.createdTimestamp).toISOString();
     const author = m.author?.tag || m.author?.username || 'Unknown';
     const content = m.content || '';
-    const attachments = m.attachments.map(a => `<a href="${escapeHtml(a.url)}">${escapeHtml(a.name || 'attachment')}</a>`).join(' ');
+    const attachments = m.attachments.map(a => `<a href="${a.url}">${escapeHtml(a.name || 'attachment')}</a>`).join(' ');
     return `<div class="msg"><span class="time">${time}</span> <strong>${escapeHtml(author)}</strong>: ${escapeHtml(content)} ${attachments}</div>`;
   }).join('\n');
 

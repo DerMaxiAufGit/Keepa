@@ -1,6 +1,7 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const { successEmbed, Colors } = require('../../utils/embeds');
 const { getGuildConfig, setGuildConfig } = require('../../utils/db');
+const { escapeMarkdown } = require('../../utils/strings');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -44,8 +45,8 @@ module.exports = {
       if (!channel) return interaction.reply({ content: 'Goodbye channel not found.', ephemeral: true });
 
       const text = config.goodbye_message
-        .replace(/{user}/g, interaction.user.username)
-        .replace(/{server}/g, interaction.guild.name)
+        .replace(/{user}/g, escapeMarkdown(interaction.user.username))
+        .replace(/{server}/g, escapeMarkdown(interaction.guild.name))
         .replace(/{membercount}/g, interaction.guild.memberCount);
 
       await channel.send(text);

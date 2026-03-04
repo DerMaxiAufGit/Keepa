@@ -30,7 +30,7 @@ module.exports = {
     }
 
     // Check this is a ticket channel
-    const { rows } = await query("SELECT * FROM tickets WHERE channel_id = $1 AND status = 'open'", [interaction.channelId]);
+    const { rows } = await query("SELECT id, guild_id, channel_id, user_id, assigned_to, status FROM tickets WHERE channel_id = $1 AND status = 'open'", [interaction.channelId]);
     const ticket = rows[0];
     if (!ticket) return interaction.reply({ embeds: [errorEmbed('Not a Ticket', 'Use this in a ticket channel.')], ephemeral: true });
 
@@ -47,6 +47,9 @@ module.exports = {
     }
 
     if (sub === 'add') {
+      if (!isOwner && !hasManageChannels && !hasSupportRole) {
+        return interaction.reply({ embeds: [errorEmbed('No Permission', 'Only the ticket owner or staff can add users.')], ephemeral: true });
+      }
       const user = interaction.options.getUser('user');
       try {
         await interaction.channel.permissionOverwrites.edit(user.id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true });
@@ -58,6 +61,9 @@ module.exports = {
     }
 
     if (sub === 'remove') {
+      if (!isOwner && !hasManageChannels && !hasSupportRole) {
+        return interaction.reply({ embeds: [errorEmbed('No Permission', 'Only the ticket owner or staff can remove users.')], ephemeral: true });
+      }
       const user = interaction.options.getUser('user');
       try {
         await interaction.channel.permissionOverwrites.delete(user.id);

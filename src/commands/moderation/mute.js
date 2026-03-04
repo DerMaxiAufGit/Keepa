@@ -2,6 +2,7 @@ const { SlashCommandBuilder } = require('discord.js');
 const { successEmbed, errorEmbed, modLogEmbed } = require('../../utils/embeds');
 const { query, getGuildConfig } = require('../../utils/db');
 const { parseDuration, formatDuration, nowUnixSeconds } = require('../../utils/time');
+const { truncate } = require('../../utils/strings');
 const logger = require('../../utils/logger');
 
 module.exports = {
@@ -43,14 +44,20 @@ module.exports = {
     }
 
     const now = nowUnixSeconds();
-    const result = await query(
-      'INSERT INTO infractions (guild_id, user_id, moderator_id, type, reason, duration, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
-      [interaction.guildId, user.id, interaction.user.id, 'mute', reason, duration, now + duration]
-    );
-    const caseId = result.rows[0].id;
+    let caseId = '?';
+    try {
+      const result = await query(
+        'INSERT INTO infractions (guild_id, user_id, moderator_id, type, reason, duration, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
+        [interaction.guildId, user.id, interaction.user.id, 'mute', reason, duration, now + duration]
+      );
+      caseId = result.rows[0].id;
+    } catch (err) {
+      logger.error(`Failed to record mute infraction for ${user.id}: ${err.message}`);
+      return interaction.reply({ embeds: [errorEmbed('Partial Failure', 'User was muted but the infraction could not be recorded (DB error).')], ephemeral: true });
+    }
 
     // DM may fail if user has DMs disabled
-    try { await user.send(`You have been muted in **${interaction.guild.name}** for ${formatDuration(duration)}.\nReason: ${reason}`); } catch {}
+    try { await user.send(`You have been muted in **${interaction.guild.name}** for ${formatDuration(duration)}.\nReason: ${truncate(reason, 1000)}`); } catch {}
 
     await interaction.reply({ embeds: [successEmbed('User Muted', `**${user.tag || user.username}** muted for ${formatDuration(duration)}.\nCase #${caseId}`)] });
 

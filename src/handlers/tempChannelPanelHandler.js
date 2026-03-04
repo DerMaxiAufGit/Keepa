@@ -50,12 +50,12 @@ function isChannelLocked(channel) {
   return everyonePerms.deny.has(PermissionsBitField.Flags.Connect);
 }
 
-function checkPanelPermission(interaction, temp) {
+async function checkPanelPermission(interaction, temp) {
   const isOwner = temp.owner_id === interaction.user.id;
   const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
   const isMod = interaction.member.permissions.has(PermissionsBitField.Flags.ManageChannels);
   if (!isOwner && !isAdmin && !isMod) {
-    interaction.reply({ content: 'You do not have permission to manage this channel.', ephemeral: true });
+    await interaction.reply({ content: 'You do not have permission to manage this channel.', ephemeral: true });
     return false;
   }
   return true;
@@ -75,13 +75,13 @@ async function updateControlPanel(channel, temp) {
 }
 
 async function handleTempChannelButton(interaction) {
-  const { rows } = await query('SELECT * FROM temp_channels WHERE channel_id = $1', [interaction.channel.id]);
+  const { rows } = await query('SELECT channel_id, guild_id, owner_id, parent_id, control_message_id FROM temp_channels WHERE channel_id = $1', [interaction.channel.id]);
   const temp = rows[0];
   if (!temp) {
     return interaction.reply({ content: 'This is not a managed temp channel.', ephemeral: true });
   }
 
-  if (!checkPanelPermission(interaction, temp)) return;
+  if (!await checkPanelPermission(interaction, temp)) return;
 
   const channel = interaction.channel;
   const action = interaction.customId;
@@ -166,7 +166,7 @@ async function handleTempChannelButton(interaction) {
 
     await query('UPDATE temp_channels SET owner_id = $1 WHERE channel_id = $2', [interaction.user.id, channel.id]);
 
-    const { rows: updatedRows } = await query('SELECT * FROM temp_channels WHERE channel_id = $1', [channel.id]);
+    const { rows: updatedRows } = await query('SELECT channel_id, guild_id, owner_id, parent_id, control_message_id FROM temp_channels WHERE channel_id = $1', [channel.id]);
     const updatedTemp = updatedRows[0];
     await interaction.reply({ content: 'You are now the owner of this channel.', ephemeral: true });
     await updateControlPanel(channel, updatedTemp);
@@ -174,13 +174,13 @@ async function handleTempChannelButton(interaction) {
 }
 
 async function handleTempChannelModal(interaction) {
-  const { rows } = await query('SELECT * FROM temp_channels WHERE channel_id = $1', [interaction.channel.id]);
+  const { rows } = await query('SELECT channel_id, guild_id, owner_id, parent_id, control_message_id FROM temp_channels WHERE channel_id = $1', [interaction.channel.id]);
   const temp = rows[0];
   if (!temp) {
     return interaction.reply({ content: 'This is not a managed temp channel.', ephemeral: true });
   }
 
-  if (!checkPanelPermission(interaction, temp)) return;
+  if (!await checkPanelPermission(interaction, temp)) return;
 
   const channel = interaction.channel;
 
@@ -209,13 +209,13 @@ async function handleTempChannelModal(interaction) {
 }
 
 async function handleTempChannelSelect(interaction) {
-  const { rows } = await query('SELECT * FROM temp_channels WHERE channel_id = $1', [interaction.channel.id]);
+  const { rows } = await query('SELECT channel_id, guild_id, owner_id, parent_id, control_message_id FROM temp_channels WHERE channel_id = $1', [interaction.channel.id]);
   const temp = rows[0];
   if (!temp) {
     return interaction.reply({ content: 'This is not a managed temp channel.', ephemeral: true });
   }
 
-  if (!checkPanelPermission(interaction, temp)) return;
+  if (!await checkPanelPermission(interaction, temp)) return;
 
   const channel = interaction.channel;
   const targetId = interaction.values[0];

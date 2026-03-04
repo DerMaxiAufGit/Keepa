@@ -193,4 +193,16 @@ function logAutomod(message, reason, config, client) {
   }).catch(err => logger.warn(`Log send failed: ${err.message}`));
 }
 
-module.exports = { runAutomod };
+function invalidateAutomodCache(guildId, key = null) {
+  if (key) {
+    automodCache.get(guildId)?.delete(key);
+  } else {
+    automodCache.delete(guildId);
+  }
+}
+
+function pruneAutomodCache(guildId) {
+  automodCache.delete(guildId);
+}
+
+module.exports = { runAutomod, invalidateAutomodCache, pruneAutomodCache };

@@ -26,14 +26,19 @@ module.exports = {
       return interaction.reply({ embeds: [errorEmbed('Unban Failed', 'Could not unban that user. Check the ID.')], ephemeral: true });
     }
 
-    await query(
-      'UPDATE infractions SET active = 0 WHERE guild_id = $1 AND user_id = $2 AND type = $3 AND active = 1',
-      [interaction.guildId, userId, 'ban']
-    );
+    try {
+      await query(
+        'UPDATE infractions SET active = 0 WHERE guild_id = $1 AND user_id = $2 AND type = $3 AND active = 1',
+        [interaction.guildId, userId, 'ban']
+      );
+    } catch (err) {
+      logger.error(`Failed to update ban infraction for ${userId}: ${err.message}`);
+      return interaction.reply({ embeds: [errorEmbed('Partial Failure', 'User was unbanned but the infraction record could not be updated (DB error).')], ephemeral: true });
+    }
 
-    const user = await client.users.fetch(userId).catch(() => ({ id: userId, username: userId, tag: userId }));
+    const user = await client.users.fetch(userId).catch(() => ({ id: userId, username: userId }));
 
-    await interaction.reply({ embeds: [successEmbed('User Unbanned', `**${user.tag || user.username}** has been unbanned.`)] });
+    await interaction.reply({ embeds: [successEmbed('User Unbanned', `**${user.username}** has been unbanned.`)] });
 
     try {
       const config = await getGuildConfig(interaction.guildId);

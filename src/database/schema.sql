@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS filter_links (
   id SERIAL PRIMARY KEY,
   guild_id TEXT NOT NULL,
   domain TEXT NOT NULL,
-  mode TEXT DEFAULT 'blacklist',
+  mode TEXT DEFAULT 'blacklist' CHECK (mode IN ('blacklist', 'whitelist')),
   UNIQUE(guild_id, domain)
 );
 
@@ -155,7 +155,7 @@ CREATE TABLE IF NOT EXISTS stats_channels (
 CREATE TABLE IF NOT EXISTS automod_whitelist (
   id SERIAL PRIMARY KEY,
   guild_id TEXT NOT NULL,
-  type TEXT NOT NULL,
+  type TEXT NOT NULL CHECK (type IN ('channel', 'role')),
   target_id TEXT NOT NULL,
   UNIQUE(guild_id, type, target_id)
 );

@@ -7,7 +7,7 @@ async function handleVoiceJoin(oldState, newState, client) {
   if (!newState.channelId || oldState.channelId === newState.channelId) return;
 
   const { rows } = await query(
-    'SELECT * FROM temp_channel_hubs WHERE channel_id = $1 AND guild_id = $2',
+    'SELECT channel_id, guild_id, channel_name, channel_limit, category_id FROM temp_channel_hubs WHERE channel_id = $1 AND guild_id = $2',
     [newState.channelId, newState.guild.id]
   );
   const hub = rows[0];
@@ -52,7 +52,7 @@ async function handleVoiceJoin(oldState, newState, client) {
 async function handleVoiceLeave(oldState, newState, client) {
   if (!oldState.channelId || oldState.channelId === newState.channelId) return;
 
-  const { rows } = await query('SELECT * FROM temp_channels WHERE channel_id = $1', [oldState.channelId]);
+  const { rows } = await query('SELECT channel_id, guild_id, owner_id FROM temp_channels WHERE channel_id = $1', [oldState.channelId]);
   const temp = rows[0];
   if (!temp) return;
 

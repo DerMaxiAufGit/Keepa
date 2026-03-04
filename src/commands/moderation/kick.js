@@ -1,6 +1,7 @@
 const { SlashCommandBuilder } = require('discord.js');
 const { successEmbed, errorEmbed, modLogEmbed } = require('../../utils/embeds');
 const { query, getGuildConfig } = require('../../utils/db');
+const { truncate } = require('../../utils/strings');
 const logger = require('../../utils/logger');
 
 module.exports = {
@@ -34,14 +35,20 @@ module.exports = {
       return interaction.reply({ embeds: [errorEmbed('Kick Failed', 'Could not kick this user. Check my permissions and role hierarchy.')], ephemeral: true });
     }
 
-    const result = await query(
-      'INSERT INTO infractions (guild_id, user_id, moderator_id, type, reason) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-      [interaction.guildId, user.id, interaction.user.id, 'kick', reason]
-    );
-    const caseId = result.rows[0].id;
+    let caseId = '?';
+    try {
+      const result = await query(
+        'INSERT INTO infractions (guild_id, user_id, moderator_id, type, reason) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+        [interaction.guildId, user.id, interaction.user.id, 'kick', reason]
+      );
+      caseId = result.rows[0].id;
+    } catch (err) {
+      logger.error(`Failed to record kick infraction for ${user.id}: ${err.message}`);
+      return interaction.reply({ embeds: [errorEmbed('Partial Failure', 'User was kicked but the infraction could not be recorded (DB error).')], ephemeral: true });
+    }
 
     // DM after action succeeds — may fail if user has DMs disabled
-    try { await user.send(`You have been kicked from **${interaction.guild.name}**.\nReason: ${reason}`); } catch {}
+    try { await user.send(`You have been kicked from **${interaction.guild.name}**.\nReason: ${truncate(reason, 1000)}`); } catch {}
 
     await interaction.reply({ embeds: [successEmbed('User Kicked', `**${user.tag || user.username}** has been kicked.\nCase #${caseId}`)] });
 

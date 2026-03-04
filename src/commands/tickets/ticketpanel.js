@@ -63,7 +63,11 @@ module.exports = {
         new ButtonBuilder().setCustomId('create_ticket').setLabel('Create Ticket').setStyle(ButtonStyle.Primary).setEmoji('🎫')
       );
 
-      await channel.send({ embeds: [embed], components: [row] });
+      try {
+        await channel.send({ embeds: [embed], components: [row] });
+      } catch (err) {
+        return interaction.reply({ embeds: [errorEmbed('Error', 'Could not send the ticket panel. Check channel permissions.')], ephemeral: true });
+      }
       return interaction.reply({ embeds: [successEmbed('Panel Created', `Ticket panel posted in ${channel}.`)], ephemeral: true });
     }
   },

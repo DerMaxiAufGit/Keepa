@@ -8,6 +8,9 @@ const logger = require('./utils/logger');
 
 const REQUIRED_ENV = ['DISCORD_TOKEN', 'DATABASE_URL'];
 
+process.on('unhandledRejection', (err) => logger.error('Unhandled rejection:', err));
+process.on('uncaughtException', (err) => logger.error('Uncaught exception:', err));
+
 (async () => {
   const missing = REQUIRED_ENV.filter(key => !process.env[key]);
   if (missing.length > 0) {
@@ -22,9 +25,6 @@ const REQUIRED_ENV = ['DISCORD_TOKEN', 'DATABASE_URL'];
   loadCommands(client);
   loadEvents(client);
   startCronJobs(client);
-
-  process.on('unhandledRejection', (err) => logger.error('Unhandled rejection:', err));
-  process.on('uncaughtException', (err) => logger.error('Uncaught exception:', err));
 
   await client.login(process.env.DISCORD_TOKEN);
 })();
