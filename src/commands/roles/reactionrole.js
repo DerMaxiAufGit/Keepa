@@ -1,6 +1,7 @@
 const { SlashCommandBuilder } = require('discord.js');
 const { successEmbed, errorEmbed } = require('../../utils/embeds');
-const { getDb } = require('../../utils/db');
+const { query } = require('../../utils/db');
+const { validateAssignableRole } = require('../../utils/roleValidation');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -18,12 +19,21 @@ module.exports = {
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
-    const db = getDb();
     const messageId = interaction.options.getString('message_id');
     const emoji = interaction.options.getString('emoji');
 
+    // Validate message ID format
+    if (!/^\d{17,20}$/.test(messageId)) {
+      return interaction.reply({ embeds: [errorEmbed('Invalid ID', 'Please provide a valid message ID (17-20 digits).')], ephemeral: true });
+    }
+
     if (sub === 'add') {
       const role = interaction.options.getRole('role');
+
+      const validation = validateAssignableRole(role, interaction.guild);
+      if (!validation.valid) {
+        return interaction.reply({ embeds: [errorEmbed('Invalid Role', `${role} cannot be assigned: ${validation.reason}.`)], ephemeral: true });
+      }
 
       // Try to react to verify message exists
       try {
@@ -34,9 +44,10 @@ module.exports = {
       }
 
       try {
-        db.prepare(
-          'INSERT INTO reaction_roles (guild_id, channel_id, message_id, emoji, role_id) VALUES (?, ?, ?, ?, ?)'
-        ).run(interaction.guildId, interaction.channelId, messageId, emoji, role.id);
+        await query(
+          'INSERT INTO reaction_roles (guild_id, channel_id, message_id, emoji, role_id) VALUES ($1, $2, $3, $4, $5)',
+          [interaction.guildId, interaction.channelId, messageId, emoji, role.id]
+        );
         return interaction.reply({ embeds: [successEmbed('Reaction Role Added', `${emoji} → ${role}`)], ephemeral: true });
       } catch {
         return interaction.reply({ embeds: [errorEmbed('Already Exists', 'That emoji is already bound on this message.')], ephemeral: true });
@@ -44,10 +55,11 @@ module.exports = {
     }
 
     if (sub === 'remove') {
-      const result = db.prepare(
-        'DELETE FROM reaction_roles WHERE guild_id = ? AND message_id = ? AND emoji = ?'
-      ).run(interaction.guildId, messageId, emoji);
-      if (result.changes === 0) return interaction.reply({ embeds: [errorEmbed('Not Found', 'No reaction role found.')], ephemeral: true });
+      const result = await query(
+        'DELETE FROM reaction_roles WHERE guild_id = $1 AND message_id = $2 AND emoji = $3',
+        [interaction.guildId, messageId, emoji]
+      );
+      if (result.rowCount === 0) return interaction.reply({ embeds: [errorEmbed('Not Found', 'No reaction role found.')], ephemeral: true });
       return interaction.reply({ embeds: [successEmbed('Reaction Role Removed', 'Binding removed.')], ephemeral: true });
     }
   },

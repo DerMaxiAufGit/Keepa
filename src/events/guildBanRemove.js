@@ -1,10 +1,17 @@
 const { EmbedBuilder } = require('discord.js');
 const { getGuildConfig } = require('../utils/db');
 const { Colors } = require('../utils/embeds');
+const logger = require('../utils/logger');
 
 module.exports = {
   async execute(ban, client) {
-    const config = getGuildConfig(ban.guild.id);
+    let config;
+    try {
+      config = await getGuildConfig(ban.guild.id);
+    } catch (err) {
+      logger.error(`Failed to get guild config: ${err.message}`);
+      return;
+    }
     if (!config.mod_log_channel) return;
     const channel = ban.guild.channels.cache.get(config.mod_log_channel);
     if (!channel) return;
@@ -17,6 +24,6 @@ module.exports = {
       .setTimestamp()
       .setFooter({ text: 'Keepa' });
 
-    channel.send({ embeds: [embed] }).catch(() => {});
+    channel.send({ embeds: [embed] }).catch(err => logger.warn(`Log send failed: ${err.message}`));
   },
 };

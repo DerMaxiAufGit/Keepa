@@ -2,16 +2,31 @@ const { EmbedBuilder } = require('discord.js');
 const { getGuildConfig } = require('../utils/db');
 const { Colors } = require('../utils/embeds');
 const { handleVoiceJoin, handleVoiceLeave } = require('../handlers/tempChannelHandler');
+const logger = require('../utils/logger');
 
 module.exports = {
   async execute(oldState, newState, client) {
     // Temp channel logic first
-    await handleVoiceJoin(oldState, newState, client);
-    await handleVoiceLeave(oldState, newState, client);
+    try {
+      await handleVoiceJoin(oldState, newState, client);
+    } catch (err) {
+      logger.error(`handleVoiceJoin error: ${err.message}`);
+    }
+    try {
+      await handleVoiceLeave(oldState, newState, client);
+    } catch (err) {
+      logger.error(`handleVoiceLeave error: ${err.message}`);
+    }
 
     // Voice logging
     const guild = newState.guild;
-    const config = getGuildConfig(guild.id);
+    let config;
+    try {
+      config = await getGuildConfig(guild.id);
+    } catch (err) {
+      logger.error(`Failed to get guild config: ${err.message}`);
+      return;
+    }
     if (!config.voice_log_channel) return;
     const logChannel = guild.channels.cache.get(config.voice_log_channel);
     if (!logChannel) return;
@@ -27,7 +42,7 @@ module.exports = {
         .setTitle('Voice Join')
         .setDescription(`**${tag}** joined <#${newState.channelId}>`)
         .setTimestamp().setFooter({ text: 'Keepa' });
-      logChannel.send({ embeds: [embed] }).catch(() => {});
+      logChannel.send({ embeds: [embed] }).catch(err => logger.warn(`Log send failed: ${err.message}`));
     }
     // Left voice
     else if (oldState.channelId && !newState.channelId) {
@@ -36,7 +51,7 @@ module.exports = {
         .setTitle('Voice Leave')
         .setDescription(`**${tag}** left <#${oldState.channelId}>`)
         .setTimestamp().setFooter({ text: 'Keepa' });
-      logChannel.send({ embeds: [embed] }).catch(() => {});
+      logChannel.send({ embeds: [embed] }).catch(err => logger.warn(`Log send failed: ${err.message}`));
     }
     // Moved channels
     else if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
@@ -45,7 +60,7 @@ module.exports = {
         .setTitle('Voice Move')
         .setDescription(`**${tag}** moved from <#${oldState.channelId}> to <#${newState.channelId}>`)
         .setTimestamp().setFooter({ text: 'Keepa' });
-      logChannel.send({ embeds: [embed] }).catch(() => {});
+      logChannel.send({ embeds: [embed] }).catch(err => logger.warn(`Log send failed: ${err.message}`));
     }
   },
 };

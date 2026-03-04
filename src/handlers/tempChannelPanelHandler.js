@@ -9,7 +9,7 @@ const {
   TextInputStyle,
   PermissionsBitField,
 } = require('discord.js');
-const { getDb } = require('../utils/db');
+const { query } = require('../utils/db');
 const { Colors } = require('../utils/embeds');
 const logger = require('../utils/logger');
 
@@ -75,8 +75,8 @@ async function updateControlPanel(channel, temp) {
 }
 
 async function handleTempChannelButton(interaction) {
-  const db = getDb();
-  const temp = db.prepare('SELECT * FROM temp_channels WHERE channel_id = ?').get(interaction.channel.id);
+  const { rows } = await query('SELECT * FROM temp_channels WHERE channel_id = $1', [interaction.channel.id]);
+  const temp = rows[0];
   if (!temp) {
     return interaction.reply({ content: 'This is not a managed temp channel.', ephemeral: true });
   }
@@ -128,9 +128,9 @@ async function handleTempChannelButton(interaction) {
   }
 
   else if (action === 'tc_delete') {
-    db.prepare('DELETE FROM temp_channels WHERE channel_id = ?').run(channel.id);
+    await query('DELETE FROM temp_channels WHERE channel_id = $1', [channel.id]);
     await interaction.reply({ content: 'Deleting channel...', ephemeral: true });
-    await channel.delete().catch(() => {});
+    await channel.delete().catch(err => logger.warn(`Temp channel delete failed: ${err.message}`));
   }
 
   else if (action === 'tc_permit') {
@@ -158,35 +158,40 @@ async function handleTempChannelButton(interaction) {
     }
 
     // Remove old owner perms, add new owner perms
-    await channel.permissionOverwrites.delete(temp.owner_id).catch(() => {});
+    await channel.permissionOverwrites.delete(temp.owner_id).catch(err => logger.warn(`Perm delete failed: ${err.message}`));
     await channel.permissionOverwrites.edit(interaction.user.id, {
       ManageChannels: true,
       MoveMembers: true,
     });
 
-    db.prepare('UPDATE temp_channels SET owner_id = ? WHERE channel_id = ?')
-      .run(interaction.user.id, channel.id);
+    await query('UPDATE temp_channels SET owner_id = $1 WHERE channel_id = $2', [interaction.user.id, channel.id]);
 
-    const updatedTemp = db.prepare('SELECT * FROM temp_channels WHERE channel_id = ?').get(channel.id);
+    const { rows: updatedRows } = await query('SELECT * FROM temp_channels WHERE channel_id = $1', [channel.id]);
+    const updatedTemp = updatedRows[0];
     await interaction.reply({ content: 'You are now the owner of this channel.', ephemeral: true });
     await updateControlPanel(channel, updatedTemp);
   }
 }
 
 async function handleTempChannelModal(interaction) {
-  const db = getDb();
-  const temp = db.prepare('SELECT * FROM temp_channels WHERE channel_id = ?').get(interaction.channel.id);
+  const { rows } = await query('SELECT * FROM temp_channels WHERE channel_id = $1', [interaction.channel.id]);
+  const temp = rows[0];
   if (!temp) {
     return interaction.reply({ content: 'This is not a managed temp channel.', ephemeral: true });
   }
 
+  if (!checkPanelPermission(interaction, temp)) return;
+
   const channel = interaction.channel;
 
   if (interaction.customId === 'tc_modal_rename') {
-    const name = interaction.fields.getTextInputValue('name').trim();
-    if (!name) return interaction.reply({ content: 'Name cannot be empty.', ephemeral: true });
+    const rawName = interaction.fields.getTextInputValue('name').trim();
+    // Sanitize: strip control characters, validate length
+    const name = rawName.replace(/[\x00-\x1F\x7F]/g, '').trim();
+    if (!name || name.length > 100) return interaction.reply({ content: 'Name must be 1-100 characters.', ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
     await channel.setName(name);
-    await interaction.reply({ content: `Channel renamed to **${name}**.`, ephemeral: true });
+    await interaction.editReply({ content: `Channel renamed to **${name}**.` });
     await updateControlPanel(channel, temp);
   }
 
@@ -196,15 +201,16 @@ async function handleTempChannelModal(interaction) {
     if (isNaN(limit) || limit < 0 || limit > 99) {
       return interaction.reply({ content: 'Please enter a number between 0 and 99.', ephemeral: true });
     }
+    await interaction.deferReply({ ephemeral: true });
     await channel.setUserLimit(limit);
-    await interaction.reply({ content: limit === 0 ? 'User limit removed.' : `User limit set to **${limit}**.`, ephemeral: true });
+    await interaction.editReply({ content: limit === 0 ? 'User limit removed.' : `User limit set to **${limit}**.` });
     await updateControlPanel(channel, temp);
   }
 }
 
 async function handleTempChannelSelect(interaction) {
-  const db = getDb();
-  const temp = db.prepare('SELECT * FROM temp_channels WHERE channel_id = ?').get(interaction.channel.id);
+  const { rows } = await query('SELECT * FROM temp_channels WHERE channel_id = $1', [interaction.channel.id]);
+  const temp = rows[0];
   if (!temp) {
     return interaction.reply({ content: 'This is not a managed temp channel.', ephemeral: true });
   }
@@ -224,7 +230,7 @@ async function handleTempChannelSelect(interaction) {
   else if (interaction.customId === 'tc_select_reject') {
     await channel.permissionOverwrites.edit(targetId, { Connect: false });
     if (target.voice?.channelId === channel.id) {
-      await target.voice.disconnect().catch(() => {});
+      await target.voice.disconnect().catch(err => logger.warn(`Disconnect failed: ${err.message}`));
     }
     await interaction.reply({ content: `Rejected <@${targetId}> from the channel.`, ephemeral: true });
   }

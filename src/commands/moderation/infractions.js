@@ -1,7 +1,8 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const { errorEmbed, Colors } = require('../../utils/embeds');
-const { getDb } = require('../../utils/db');
+const { query } = require('../../utils/db');
 const { paginate } = require('../../utils/paginator');
+const { BOT_NAME } = require('../../utils/constants');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -14,10 +15,11 @@ module.exports = {
   async execute(interaction, client) {
     await interaction.deferReply();
     const user = interaction.options.getUser('user');
-    const db = getDb();
-    const rows = db.prepare(
-      'SELECT * FROM infractions WHERE guild_id = ? AND user_id = ? ORDER BY created_at DESC'
-    ).all(interaction.guildId, user.id);
+    // Timestamps are stored as Unix seconds (BIGINT)
+    const { rows } = await query(
+      'SELECT id, type, reason, moderator_id, active, created_at FROM infractions WHERE guild_id = $1 AND user_id = $2 ORDER BY created_at DESC LIMIT 100',
+      [interaction.guildId, user.id]
+    );
 
     if (rows.length === 0) {
       return interaction.editReply({ embeds: [errorEmbed('No Infractions', `**${user.tag || user.username}** has no infractions.`)] });
@@ -38,7 +40,7 @@ module.exports = {
           .setColor(Colors.INFO)
           .setTitle(`Infractions for ${user.tag || user.username}`)
           .setDescription(desc)
-          .setFooter({ text: `Total: ${rows.length} infractions | Keepa` })
+          .setFooter({ text: `Total: ${rows.length} infractions | ${BOT_NAME}` })
           .setTimestamp()
       );
     }

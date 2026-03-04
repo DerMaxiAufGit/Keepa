@@ -1,6 +1,6 @@
 const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { successEmbed, errorEmbed, Colors } = require('../../utils/embeds');
-const { getDb } = require('../../utils/db');
+const { query } = require('../../utils/db');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -20,7 +20,6 @@ module.exports = {
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
-    const db = getDb();
 
     if (sub === 'setup') {
       const supportRole = interaction.options.getRole('support_role');
@@ -29,19 +28,22 @@ module.exports = {
       const maxOpen = interaction.options.getInteger('max_open');
 
       // Ensure config exists
-      db.prepare('INSERT OR IGNORE INTO ticket_config (guild_id) VALUES (?)').run(interaction.guildId);
+      await query('INSERT INTO ticket_config (guild_id) VALUES ($1) ON CONFLICT (guild_id) DO NOTHING', [interaction.guildId]);
 
       if (supportRole) {
-        const current = db.prepare('SELECT support_roles FROM ticket_config WHERE guild_id = ?').get(interaction.guildId);
-        const roles = JSON.parse(current.support_roles || '[]');
-        if (!roles.includes(supportRole.id)) roles.push(supportRole.id);
-        db.prepare('UPDATE ticket_config SET support_roles = ? WHERE guild_id = ?').run(JSON.stringify(roles), interaction.guildId);
+        const { rows } = await query('SELECT support_roles FROM ticket_config WHERE guild_id = $1', [interaction.guildId]);
+        let roles = [];
+        try { roles = JSON.parse(rows[0].support_roles || '[]'); } catch { roles = []; }
+        if (!roles.includes(supportRole.id)) {
+          const updated = [...roles, supportRole.id];
+          await query('UPDATE ticket_config SET support_roles = $1 WHERE guild_id = $2', [JSON.stringify(updated), interaction.guildId]);
+        }
       }
-      if (category) db.prepare('UPDATE ticket_config SET category_id = ? WHERE guild_id = ?').run(category.id, interaction.guildId);
-      if (logChannel) db.prepare('UPDATE ticket_config SET transcript_channel = ? WHERE guild_id = ?').run(logChannel.id, interaction.guildId);
-      if (maxOpen) db.prepare('UPDATE ticket_config SET max_open = ? WHERE guild_id = ?').run(maxOpen, interaction.guildId);
+      if (category) await query('UPDATE ticket_config SET category_id = $1 WHERE guild_id = $2', [category.id, interaction.guildId]);
+      if (logChannel) await query('UPDATE ticket_config SET transcript_channel = $1 WHERE guild_id = $2', [logChannel.id, interaction.guildId]);
+      if (maxOpen) await query('UPDATE ticket_config SET max_open = $1 WHERE guild_id = $2', [maxOpen, interaction.guildId]);
 
-      db.prepare('UPDATE ticket_config SET enabled = 1 WHERE guild_id = ?').run(interaction.guildId);
+      await query('UPDATE ticket_config SET enabled = 1 WHERE guild_id = $1', [interaction.guildId]);
 
       return interaction.reply({ embeds: [successEmbed('Ticket System Configured', 'Ticket system is now enabled.')], ephemeral: true });
     }

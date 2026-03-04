@@ -1,19 +1,70 @@
-const { getDb, getGuildConfig } = require('../utils/db');
-const { warnEmbed, modLogEmbed } = require('../utils/embeds');
+const { query, getGuildConfig } = require('../utils/db');
+const { modLogEmbed } = require('../utils/embeds');
 const logger = require('../utils/logger');
+
+const VALID_ACTIONS = new Set(['delete', 'warn', 'mute', 'kick', 'ban']);
+
+// Per-guild in-memory cache with 60s TTL
+const automodCache = new Map();
+const CACHE_TTL = 60000;
+
+function getCachedData(guildId, key) {
+  const guildCache = automodCache.get(guildId);
+  if (!guildCache) return null;
+  const entry = guildCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > CACHE_TTL) {
+    guildCache.delete(key);
+    return null;
+  }
+  return entry.data;
+}
+
+function setCachedData(guildId, key, data) {
+  if (!automodCache.has(guildId)) automodCache.set(guildId, new Map());
+  automodCache.get(guildId).set(key, { data, timestamp: Date.now() });
+}
+
+async function isWhitelisted(message) {
+  const guildId = message.guild.id;
+  let rows = getCachedData(guildId, 'whitelist');
+  if (!rows) {
+    const result = await query(
+      'SELECT target_id, type FROM automod_whitelist WHERE guild_id = $1',
+      [guildId]
+    );
+    rows = result.rows;
+    setCachedData(guildId, 'whitelist', rows);
+  }
+
+  for (const entry of rows) {
+    if (entry.type === 'channel' && entry.target_id === message.channel.id) return true;
+    if (entry.type === 'role' && message.member?.roles.cache.has(entry.target_id)) return true;
+  }
+
+  return false;
+}
 
 async function runAutomod(message, client) {
   if (!message.guild || message.author.bot) return false;
   if (message.member?.permissions.has('ManageMessages')) return false;
+  if (await isWhitelisted(message)) return false;
 
-  const config = getGuildConfig(message.guild.id);
-  const db = getDb();
+  const config = await getGuildConfig(message.guild.id);
+  const guildId = message.guild.id;
 
   // 1. Word filter
-  const words = db.prepare('SELECT * FROM filter_words WHERE guild_id = ?').all(message.guild.id);
+  let words = getCachedData(guildId, 'filter_words');
+  if (!words) {
+    const result = await query('SELECT word, action FROM filter_words WHERE guild_id = $1', [guildId]);
+    words = result.rows;
+    setCachedData(guildId, 'filter_words', words);
+  }
   for (const entry of words) {
     if (message.content.toLowerCase().includes(entry.word.toLowerCase())) {
-      return await executeAction(message, entry.action, `Filtered word: ${entry.word}`, config, client);
+      const action = VALID_ACTIONS.has(entry.action) ? entry.action : 'delete';
+      if (action !== entry.action) logger.warn(`Unknown filter action "${entry.action}" for word "${entry.word}", defaulting to delete`);
+      return await executeAction(message, action, `Filtered word: ${entry.word}`, config, client);
     }
   }
 
@@ -21,8 +72,18 @@ async function runAutomod(message, client) {
   const urlRegex = /https?:\/\/([^\s/]+)/gi;
   const urls = [...message.content.matchAll(urlRegex)];
   if (urls.length > 0) {
-    const blacklisted = db.prepare("SELECT domain FROM filter_links WHERE guild_id = ? AND mode = 'blacklist'").all(message.guild.id);
-    const whitelisted = db.prepare("SELECT domain FROM filter_links WHERE guild_id = ? AND mode = 'whitelist'").all(message.guild.id);
+    let blacklisted = getCachedData(guildId, 'filter_links_black');
+    let whitelisted = getCachedData(guildId, 'filter_links_white');
+    if (!blacklisted) {
+      const result = await query("SELECT domain FROM filter_links WHERE guild_id = $1 AND mode = 'blacklist'", [guildId]);
+      blacklisted = result.rows;
+      setCachedData(guildId, 'filter_links_black', blacklisted);
+    }
+    if (!whitelisted) {
+      const result = await query("SELECT domain FROM filter_links WHERE guild_id = $1 AND mode = 'whitelist'", [guildId]);
+      whitelisted = result.rows;
+      setCachedData(guildId, 'filter_links_white', whitelisted);
+    }
     const blackSet = new Set(blacklisted.map(r => r.domain.toLowerCase()));
     const whiteSet = new Set(whitelisted.map(r => r.domain.toLowerCase()));
 
@@ -58,19 +119,15 @@ async function runAutomod(message, client) {
   // 5. Spam detection
   if (config.spam_enabled) {
     const key = `${message.guild.id}:${message.author.id}`;
-    if (!client.spamTracker.has(key)) client.spamTracker.set(key, []);
-    const timestamps = client.spamTracker.get(key);
+    const timestamps = client.spamTracker.get(key) || [];
     const now = Date.now();
-    timestamps.push(now);
-
-    // Clean entries older than 3 seconds
-    const recent = timestamps.filter(t => now - t < 3000);
+    const recent = [...timestamps, now].filter(t => now - t < 3000);
     client.spamTracker.set(key, recent);
 
     if (recent.length >= (config.spam_threshold || 5)) {
       client.spamTracker.set(key, []);
-      try { await message.member.timeout(300000, 'Spam detected'); } catch {}
-      await message.delete().catch(() => {});
+      try { await message.member.timeout(300000, 'Spam detected'); } catch (err) { logger.warn(`Spam mute failed: ${err.message}`); }
+      await message.delete().catch(err => logger.warn(`Message delete failed: ${err.message}`));
       logAutomod(message, 'Spam detected — auto-muted 5 minutes', config, client);
       return true;
     }
@@ -97,22 +154,30 @@ async function runAutomod(message, client) {
 }
 
 async function executeAction(message, action, reason, config, client) {
+  if (!VALID_ACTIONS.has(action)) {
+    logger.warn(`Unknown automod action "${action}", defaulting to delete`);
+    action = 'delete';
+  }
+
   try {
     await message.delete();
-  } catch {}
+  } catch (err) {
+    logger.warn(`Automod message delete failed: ${err.message}`);
+  }
 
   if (action === 'warn') {
-    const db = getDb();
-    db.prepare(
-      'INSERT INTO infractions (guild_id, user_id, moderator_id, type, reason) VALUES (?, ?, ?, ?, ?)'
-    ).run(message.guild.id, message.author.id, client.user.id, 'warn', `[AutoMod] ${reason}`);
+    await query(
+      'INSERT INTO infractions (guild_id, user_id, moderator_id, type, reason) VALUES ($1, $2, $3, $4, $5)',
+      [message.guild.id, message.author.id, client.user.id, 'warn', `[AutoMod] ${reason}`]
+    );
+    // DM may fail if user has DMs disabled
     try { await message.author.send(`You were warned in **${message.guild.name}**: ${reason}`); } catch {}
   } else if (action === 'mute') {
-    try { await message.member.timeout(300000, `[AutoMod] ${reason}`); } catch {}
+    try { await message.member.timeout(300000, `[AutoMod] ${reason}`); } catch (err) { logger.warn(`Automod mute failed: ${err.message}`); }
   } else if (action === 'kick') {
-    try { await message.member.kick(`[AutoMod] ${reason}`); } catch {}
+    try { await message.member.kick(`[AutoMod] ${reason}`); } catch (err) { logger.warn(`Automod kick failed: ${err.message}`); }
   } else if (action === 'ban') {
-    try { await message.member.ban({ reason: `[AutoMod] ${reason}` }); } catch {}
+    try { await message.member.ban({ reason: `[AutoMod] ${reason}` }); } catch (err) { logger.warn(`Automod ban failed: ${err.message}`); }
   }
 
   logAutomod(message, reason, config, client);
@@ -125,7 +190,7 @@ function logAutomod(message, reason, config, client) {
   if (!channel) return;
   channel.send({
     embeds: [modLogEmbed('AutoMod', message.author, client.user, reason, null, '-')],
-  }).catch(() => {});
+  }).catch(err => logger.warn(`Log send failed: ${err.message}`));
 }
 
 module.exports = { runAutomod };

@@ -1,6 +1,7 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const { successEmbed, errorEmbed, Colors } = require('../../utils/embeds');
 const { getGuildConfig, setGuildConfig } = require('../../utils/db');
+const { validateAssignableRole } = require('../../utils/roleValidation');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -16,23 +17,28 @@ module.exports = {
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
-    const config = getGuildConfig(interaction.guildId);
+    const config = await getGuildConfig(interaction.guildId);
     const roles = JSON.parse(config.auto_roles || '[]');
 
     if (sub === 'add') {
       const role = interaction.options.getRole('role');
+
+      const validation = validateAssignableRole(role, interaction.guild);
+      if (!validation.valid) {
+        return interaction.reply({ embeds: [errorEmbed('Invalid Role', `${role} cannot be used as an autorole: ${validation.reason}.`)], ephemeral: true });
+      }
+
       if (roles.includes(role.id)) return interaction.reply({ embeds: [errorEmbed('Already Added', 'This role is already an autorole.')], ephemeral: true });
-      roles.push(role.id);
-      setGuildConfig(interaction.guildId, 'auto_roles', JSON.stringify(roles));
+      const updated = [...roles, role.id];
+      await setGuildConfig(interaction.guildId, 'auto_roles', JSON.stringify(updated));
       return interaction.reply({ embeds: [successEmbed('Autorole Added', `${role} will be assigned on join.`)], ephemeral: true });
     }
 
     if (sub === 'remove') {
       const role = interaction.options.getRole('role');
-      const idx = roles.indexOf(role.id);
-      if (idx === -1) return interaction.reply({ embeds: [errorEmbed('Not Found', 'This role is not an autorole.')], ephemeral: true });
-      roles.splice(idx, 1);
-      setGuildConfig(interaction.guildId, 'auto_roles', JSON.stringify(roles));
+      if (!roles.includes(role.id)) return interaction.reply({ embeds: [errorEmbed('Not Found', 'This role is not an autorole.')], ephemeral: true });
+      const updated = roles.filter(r => r !== role.id);
+      await setGuildConfig(interaction.guildId, 'auto_roles', JSON.stringify(updated));
       return interaction.reply({ embeds: [successEmbed('Autorole Removed', `${role} removed from autoroles.`)], ephemeral: true });
     }
 

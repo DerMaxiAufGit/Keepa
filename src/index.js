@@ -6,20 +6,25 @@ const { loadEvents } = require('./handlers/eventHandler');
 const { startCronJobs } = require('./cron');
 const logger = require('./utils/logger');
 
-const client = createClient();
+const REQUIRED_ENV = ['DISCORD_TOKEN', 'DATABASE_URL'];
 
-// Attach DB
-client.db = initDb();
+(async () => {
+  const missing = REQUIRED_ENV.filter(key => !process.env[key]);
+  if (missing.length > 0) {
+    logger.error(`Missing required environment variables: ${missing.join(', ')}`);
+    process.exit(1);
+  }
 
-// Load commands and events
-loadCommands(client);
-loadEvents(client);
+  const client = createClient();
 
-// Start cron jobs
-startCronJobs(client);
+  await initDb();
 
-// Global error handlers
-process.on('unhandledRejection', (err) => logger.error('Unhandled rejection:', err));
-process.on('uncaughtException', (err) => logger.error('Uncaught exception:', err));
+  loadCommands(client);
+  loadEvents(client);
+  startCronJobs(client);
 
-client.login(process.env.DISCORD_TOKEN);
+  process.on('unhandledRejection', (err) => logger.error('Unhandled rejection:', err));
+  process.on('uncaughtException', (err) => logger.error('Uncaught exception:', err));
+
+  await client.login(process.env.DISCORD_TOKEN);
+})();

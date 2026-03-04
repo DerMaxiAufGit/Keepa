@@ -23,7 +23,7 @@ module.exports = {
     const sub = interaction.options.getSubcommand();
 
     if (sub === 'view') {
-      const c = getGuildConfig(interaction.guildId);
+      const c = await getGuildConfig(interaction.guildId);
       const embed = new EmbedBuilder()
         .setColor(Colors.INFO)
         .setTitle('Server Configuration')
@@ -47,7 +47,7 @@ module.exports = {
 
     if (sub === 'minaccountage') {
       const seconds = interaction.options.getInteger('seconds');
-      setGuildConfig(interaction.guildId, 'min_account_age', seconds);
+      await setGuildConfig(interaction.guildId, 'min_account_age', seconds);
       return interaction.reply({ embeds: [successEmbed('Config Updated', seconds === 0 ? 'Min account age disabled.' : `Min account age set to **${seconds}** seconds.`)], ephemeral: true });
     }
 
@@ -56,16 +56,16 @@ module.exports = {
       const threshold = interaction.options.getInteger('threshold');
       const window = interaction.options.getInteger('window');
 
-      setGuildConfig(interaction.guildId, 'anti_raid_enabled', toggle === 'enable' ? 1 : 0);
-      if (threshold) setGuildConfig(interaction.guildId, 'anti_raid_threshold', threshold);
-      if (window) setGuildConfig(interaction.guildId, 'anti_raid_window', window);
+      await setGuildConfig(interaction.guildId, 'anti_raid_enabled', toggle === 'enable' ? 1 : 0);
+      if (threshold) await setGuildConfig(interaction.guildId, 'anti_raid_threshold', threshold);
+      if (window) await setGuildConfig(interaction.guildId, 'anti_raid_window', window);
 
       return interaction.reply({ embeds: [successEmbed('Anti-Raid Updated', `Anti-raid **${toggle}d**.${threshold ? ` Threshold: ${threshold}` : ''}${window ? ` Window: ${window}s` : ''}`)], ephemeral: true });
     }
 
     if (sub === 'verificationrole') {
       const role = interaction.options.getRole('role');
-      setGuildConfig(interaction.guildId, 'verification_role', role.id);
+      await setGuildConfig(interaction.guildId, 'verification_role', role.id);
       return interaction.reply({ embeds: [successEmbed('Verification Role Set', `${role}`)], ephemeral: true });
     }
   },

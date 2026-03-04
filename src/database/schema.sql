@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS guild_config (
   welcome_embed INTEGER DEFAULT 0,
   goodbye_channel TEXT,
   goodbye_message TEXT,
+  goodbye_enabled INTEGER DEFAULT 1,
   mute_role TEXT,
   auto_roles TEXT DEFAULT '[]',
   verification_role TEXT,
@@ -29,19 +30,19 @@ CREATE TABLE IF NOT EXISTS guild_config (
   mention_threshold INTEGER DEFAULT 5,
   caps_enabled INTEGER DEFAULT 0,
   caps_threshold INTEGER DEFAULT 70,
-  created_at INTEGER DEFAULT (unixepoch())
+  created_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS filter_words (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id SERIAL PRIMARY KEY,
   guild_id TEXT NOT NULL,
   word TEXT NOT NULL,
-  action TEXT DEFAULT 'delete',
+  action TEXT DEFAULT 'delete' CHECK (action IN ('delete','warn','mute','kick','ban')),
   UNIQUE(guild_id, word)
 );
 
 CREATE TABLE IF NOT EXISTS filter_links (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id SERIAL PRIMARY KEY,
   guild_id TEXT NOT NULL,
   domain TEXT NOT NULL,
   mode TEXT DEFAULT 'blacklist',
@@ -49,16 +50,17 @@ CREATE TABLE IF NOT EXISTS filter_links (
 );
 
 CREATE TABLE IF NOT EXISTS infractions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id SERIAL PRIMARY KEY,
   guild_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
   moderator_id TEXT NOT NULL,
   type TEXT NOT NULL,
   reason TEXT,
-  duration INTEGER,
-  expires_at INTEGER,
+  duration BIGINT,
+  expires_at BIGINT,
   active INTEGER DEFAULT 1,
-  created_at INTEGER DEFAULT (unixepoch())
+  deleted_by TEXT,
+  created_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS temp_channels (
@@ -67,8 +69,8 @@ CREATE TABLE IF NOT EXISTS temp_channels (
   owner_id TEXT NOT NULL,
   parent_id TEXT,
   control_message_id TEXT,
-  created_at INTEGER DEFAULT (unixepoch()),
-  delete_at INTEGER
+  created_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+  delete_at BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS temp_channel_hubs (
@@ -80,7 +82,7 @@ CREATE TABLE IF NOT EXISTS temp_channel_hubs (
 );
 
 CREATE TABLE IF NOT EXISTS reaction_roles (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id SERIAL PRIMARY KEY,
   guild_id TEXT NOT NULL,
   channel_id TEXT NOT NULL,
   message_id TEXT NOT NULL,
@@ -91,7 +93,7 @@ CREATE TABLE IF NOT EXISTS reaction_roles (
 );
 
 CREATE TABLE IF NOT EXISTS component_roles (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id SERIAL PRIMARY KEY,
   guild_id TEXT NOT NULL,
   channel_id TEXT NOT NULL,
   message_id TEXT NOT NULL,
@@ -104,11 +106,11 @@ CREATE TABLE IF NOT EXISTS component_roles (
 );
 
 CREATE TABLE IF NOT EXISTS temp_roles (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id SERIAL PRIMARY KEY,
   guild_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
   role_id TEXT NOT NULL,
-  expires_at INTEGER NOT NULL
+  expires_at BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS ticket_config (
@@ -122,36 +124,44 @@ CREATE TABLE IF NOT EXISTS ticket_config (
 );
 
 CREATE TABLE IF NOT EXISTS tickets (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id SERIAL PRIMARY KEY,
   guild_id TEXT NOT NULL,
   channel_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
   assigned_to TEXT,
   status TEXT DEFAULT 'open',
   topic TEXT,
-  created_at INTEGER DEFAULT (unixepoch()),
-  closed_at INTEGER
+  created_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+  closed_at BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS invite_tracking (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id SERIAL PRIMARY KEY,
   guild_id TEXT NOT NULL,
   inviter_id TEXT NOT NULL,
   invitee_id TEXT NOT NULL,
   invite_code TEXT,
-  created_at INTEGER DEFAULT (unixepoch())
+  created_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS stats_channels (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id SERIAL PRIMARY KEY,
   guild_id TEXT NOT NULL,
   channel_id TEXT NOT NULL,
   type TEXT NOT NULL,
   template TEXT DEFAULT '{type}: {count}'
 );
 
+CREATE TABLE IF NOT EXISTS automod_whitelist (
+  id SERIAL PRIMARY KEY,
+  guild_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  UNIQUE(guild_id, type, target_id)
+);
+
 CREATE TABLE IF NOT EXISTS scheduled_messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id SERIAL PRIMARY KEY,
   guild_id TEXT NOT NULL,
   channel_id TEXT NOT NULL,
   content TEXT NOT NULL,

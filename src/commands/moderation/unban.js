@@ -1,6 +1,7 @@
 const { SlashCommandBuilder } = require('discord.js');
 const { successEmbed, errorEmbed, modLogEmbed } = require('../../utils/embeds');
-const { getDb, getGuildConfig } = require('../../utils/db');
+const { query, getGuildConfig } = require('../../utils/db');
+const logger = require('../../utils/logger');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -15,27 +16,36 @@ module.exports = {
     const userId = interaction.options.getString('user_id');
     const reason = interaction.options.getString('reason') || 'No reason provided';
 
+    if (!/^\d{17,20}$/.test(userId)) {
+      return interaction.reply({ embeds: [errorEmbed('Invalid ID', 'Please provide a valid Discord user ID (17-20 digits).')], ephemeral: true });
+    }
+
     try {
       await interaction.guild.members.unban(userId, reason);
     } catch {
       return interaction.reply({ embeds: [errorEmbed('Unban Failed', 'Could not unban that user. Check the ID.')], ephemeral: true });
     }
 
-    const db = getDb();
-    db.prepare(
-      'UPDATE infractions SET active = 0 WHERE guild_id = ? AND user_id = ? AND type = ? AND active = 1'
-    ).run(interaction.guildId, userId, 'ban');
+    await query(
+      'UPDATE infractions SET active = 0 WHERE guild_id = $1 AND user_id = $2 AND type = $3 AND active = 1',
+      [interaction.guildId, userId, 'ban']
+    );
 
     const user = await client.users.fetch(userId).catch(() => ({ id: userId, username: userId, tag: userId }));
 
     await interaction.reply({ embeds: [successEmbed('User Unbanned', `**${user.tag || user.username}** has been unbanned.`)] });
 
-    const config = getGuildConfig(interaction.guildId);
-    if (config.mod_log_channel) {
-      const channel = interaction.guild.channels.cache.get(config.mod_log_channel);
-      if (channel) {
-        channel.send({ embeds: [modLogEmbed('Unban', user, interaction.user, reason, null, '-')] }).catch(() => {});
+    try {
+      const config = await getGuildConfig(interaction.guildId);
+      if (config.mod_log_channel) {
+        const channel = interaction.guild.channels.cache.get(config.mod_log_channel);
+        if (channel) {
+          channel.send({ embeds: [modLogEmbed('Unban', user, interaction.user, reason, null, '-')] })
+            .catch(err => logger.warn(`Log send failed: ${err.message}`));
+        }
       }
+    } catch (err) {
+      logger.warn(`Mod log error: ${err.message}`);
     }
   },
 };

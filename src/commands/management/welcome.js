@@ -10,7 +10,7 @@ module.exports = {
       .setName('set')
       .setDescription('Set welcome channel and message')
       .addChannelOption(o => o.setName('channel').setDescription('Channel').setRequired(true))
-      .addStringOption(o => o.setName('message').setDescription('Message ({user}, {user.mention}, {server}, {membercount})').setRequired(true)))
+      .addStringOption(o => o.setName('message').setDescription('Message ({user}, {user.mention}, {server}, {membercount})').setRequired(true).setMaxLength(1800)))
     .addSubcommand(s => s.setName('test').setDescription('Send a test welcome message'))
     .addSubcommand(s => s.setName('toggle').setDescription('Enable/disable welcome messages')),
   permissions: ['ManageGuild'],
@@ -22,20 +22,20 @@ module.exports = {
     if (sub === 'set') {
       const channel = interaction.options.getChannel('channel');
       const message = interaction.options.getString('message');
-      setGuildConfig(interaction.guildId, 'welcome_channel', channel.id);
-      setGuildConfig(interaction.guildId, 'welcome_message', message);
+      await setGuildConfig(interaction.guildId, 'welcome_channel', channel.id);
+      await setGuildConfig(interaction.guildId, 'welcome_message', message);
       return interaction.reply({ embeds: [successEmbed('Welcome Set', `Channel: ${channel}\nMessage: ${message}`)], ephemeral: true });
     }
 
     if (sub === 'toggle') {
-      const config = getGuildConfig(interaction.guildId);
+      const config = await getGuildConfig(interaction.guildId);
       const newVal = config.welcome_enabled ? 0 : 1;
-      setGuildConfig(interaction.guildId, 'welcome_enabled', newVal);
+      await setGuildConfig(interaction.guildId, 'welcome_enabled', newVal);
       return interaction.reply({ embeds: [successEmbed('Welcome Toggled', `Welcome messages are now **${newVal ? 'enabled' : 'disabled'}**.`)], ephemeral: true });
     }
 
     if (sub === 'test') {
-      const config = getGuildConfig(interaction.guildId);
+      const config = await getGuildConfig(interaction.guildId);
       if (!config.welcome_channel || !config.welcome_message) {
         return interaction.reply({ content: 'Welcome not configured. Use `/welcome set` first.', ephemeral: true });
       }

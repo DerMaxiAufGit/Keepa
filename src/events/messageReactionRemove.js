@@ -1,4 +1,4 @@
-const { getDb } = require('../utils/db');
+const { query } = require('../utils/db');
 const logger = require('../utils/logger');
 
 module.exports = {
@@ -6,10 +6,12 @@ module.exports = {
     if (user.bot) return;
     if (reaction.partial) { try { await reaction.fetch(); } catch { return; } }
 
-    const db = getDb();
     const emoji = reaction.emoji.id ? `<:${reaction.emoji.name}:${reaction.emoji.id}>` : reaction.emoji.name;
-    const row = db.prepare('SELECT * FROM reaction_roles WHERE message_id = ? AND emoji = ?')
-      .get(reaction.message.id, emoji);
+    const { rows } = await query(
+      'SELECT role_id, mode FROM reaction_roles WHERE message_id = $1 AND emoji = $2',
+      [reaction.message.id, emoji]
+    );
+    const row = rows[0];
 
     if (!row) return;
 

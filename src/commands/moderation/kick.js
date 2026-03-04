@@ -1,6 +1,7 @@
 const { SlashCommandBuilder } = require('discord.js');
 const { successEmbed, errorEmbed, modLogEmbed } = require('../../utils/embeds');
-const { getDb, getGuildConfig } = require('../../utils/db');
+const { query, getGuildConfig } = require('../../utils/db');
+const logger = require('../../utils/logger');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -14,25 +15,45 @@ module.exports = {
   async execute(interaction, client) {
     const user = interaction.options.getUser('user');
     const reason = interaction.options.getString('reason') || 'No reason provided';
-    const member = interaction.guild.members.cache.get(user.id);
 
+    if (user.id === interaction.user.id) {
+      return interaction.reply({ embeds: [errorEmbed('Invalid Target', 'You cannot kick yourself.')], ephemeral: true });
+    }
+    if (user.bot) {
+      return interaction.reply({ embeds: [errorEmbed('Invalid Target', 'Use the bot settings to remove a bot.')], ephemeral: true });
+    }
+
+    const member = interaction.guild.members.cache.get(user.id);
     if (!member) return interaction.reply({ embeds: [errorEmbed('Not Found', 'User not in server.')], ephemeral: true });
     if (!member.kickable) return interaction.reply({ embeds: [errorEmbed('Cannot Kick', 'I cannot kick this user.')], ephemeral: true });
 
+    try {
+      await member.kick(reason);
+    } catch (err) {
+      logger.error(`Kick failed for ${user.id}: ${err.message}`);
+      return interaction.reply({ embeds: [errorEmbed('Kick Failed', 'Could not kick this user. Check my permissions and role hierarchy.')], ephemeral: true });
+    }
+
+    const result = await query(
+      'INSERT INTO infractions (guild_id, user_id, moderator_id, type, reason) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+      [interaction.guildId, user.id, interaction.user.id, 'kick', reason]
+    );
+    const caseId = result.rows[0].id;
+
+    // DM after action succeeds — may fail if user has DMs disabled
     try { await user.send(`You have been kicked from **${interaction.guild.name}**.\nReason: ${reason}`); } catch {}
-    await member.kick(reason);
 
-    const db = getDb();
-    const result = db.prepare(
-      'INSERT INTO infractions (guild_id, user_id, moderator_id, type, reason) VALUES (?, ?, ?, ?, ?)'
-    ).run(interaction.guildId, user.id, interaction.user.id, 'kick', reason);
+    await interaction.reply({ embeds: [successEmbed('User Kicked', `**${user.tag || user.username}** has been kicked.\nCase #${caseId}`)] });
 
-    await interaction.reply({ embeds: [successEmbed('User Kicked', `**${user.tag || user.username}** has been kicked.\nCase #${result.lastInsertRowid}`)] });
-
-    const config = getGuildConfig(interaction.guildId);
-    if (config.mod_log_channel) {
-      const channel = interaction.guild.channels.cache.get(config.mod_log_channel);
-      if (channel) channel.send({ embeds: [modLogEmbed('Kick', user, interaction.user, reason, null, result.lastInsertRowid)] }).catch(() => {});
+    try {
+      const config = await getGuildConfig(interaction.guildId);
+      if (config.mod_log_channel) {
+        const channel = interaction.guild.channels.cache.get(config.mod_log_channel);
+        if (channel) channel.send({ embeds: [modLogEmbed('Kick', user, interaction.user, reason, null, caseId)] })
+          .catch(err => logger.warn(`Log send failed: ${err.message}`));
+      }
+    } catch (err) {
+      logger.warn(`Mod log error: ${err.message}`);
     }
   },
 };

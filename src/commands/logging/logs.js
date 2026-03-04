@@ -43,18 +43,18 @@ module.exports = {
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
-    const config = getGuildConfig(interaction.guildId);
+    const config = await getGuildConfig(interaction.guildId);
 
     if (sub === 'set') {
       const type = interaction.options.getString('type');
       const channel = interaction.options.getChannel('channel');
-      setGuildConfig(interaction.guildId, LOG_TYPES[type], channel.id);
+      await setGuildConfig(interaction.guildId, LOG_TYPES[type], channel.id);
       return interaction.reply({ embeds: [successEmbed('Log Channel Set', `**${type}** logs → ${channel}`)], ephemeral: true });
     }
 
     if (sub === 'disable') {
       const type = interaction.options.getString('type');
-      setGuildConfig(interaction.guildId, LOG_TYPES[type], null);
+      await setGuildConfig(interaction.guildId, LOG_TYPES[type], null);
       return interaction.reply({ embeds: [successEmbed('Logging Disabled', `**${type}** logging disabled.`)], ephemeral: true });
     }
 

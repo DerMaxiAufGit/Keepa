@@ -1,10 +1,17 @@
 const { EmbedBuilder } = require('discord.js');
 const { getGuildConfig } = require('../utils/db');
 const { Colors } = require('../utils/embeds');
+const logger = require('../utils/logger');
 
 module.exports = {
   async execute(oldMember, newMember, client) {
-    const config = getGuildConfig(newMember.guild.id);
+    let config;
+    try {
+      config = await getGuildConfig(newMember.guild.id);
+    } catch (err) {
+      logger.error(`Failed to get guild config: ${err.message}`);
+      return;
+    }
     if (!config.member_log_channel) return;
     const channel = newMember.guild.channels.cache.get(config.member_log_channel);
     if (!channel) return;
@@ -24,7 +31,7 @@ module.exports = {
       if (addedRoles.size > 0) embed.addFields({ name: 'Added', value: addedRoles.map(r => r.toString()).join(', ') });
       if (removedRoles.size > 0) embed.addFields({ name: 'Removed', value: removedRoles.map(r => r.toString()).join(', ') });
 
-      channel.send({ embeds: [embed] }).catch(() => {});
+      channel.send({ embeds: [embed] }).catch(err => logger.warn(`Log send failed: ${err.message}`));
     }
 
     // Nickname changes
@@ -40,7 +47,7 @@ module.exports = {
         .setTimestamp()
         .setFooter({ text: 'Keepa' });
 
-      channel.send({ embeds: [embed] }).catch(() => {});
+      channel.send({ embeds: [embed] }).catch(err => logger.warn(`Log send failed: ${err.message}`));
     }
   },
 };

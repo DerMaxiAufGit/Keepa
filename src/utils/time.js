@@ -32,4 +32,8 @@ function formatDuration(seconds) {
   return parts.join(' ') || '0s';
 }
 
-module.exports = { parseDuration, formatDuration };
+function nowUnixSeconds() {
+  return Math.floor(Date.now() / 1000);
+}
+
+module.exports = { parseDuration, formatDuration, nowUnixSeconds };

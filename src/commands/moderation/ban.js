@@ -1,7 +1,7 @@
 const { SlashCommandBuilder } = require('discord.js');
 const { successEmbed, errorEmbed, modLogEmbed } = require('../../utils/embeds');
-const { getDb, getGuildConfig } = require('../../utils/db');
-const { parseDuration, formatDuration } = require('../../utils/time');
+const { query, getGuildConfig } = require('../../utils/db');
+const { parseDuration, formatDuration, nowUnixSeconds } = require('../../utils/time');
 const logger = require('../../utils/logger');
 
 module.exports = {
@@ -24,39 +24,59 @@ module.exports = {
     const reason = interaction.options.getString('reason') || 'No reason provided';
     const durationStr = interaction.options.getString('duration');
     const deleteMessages = interaction.options.getInteger('delete_messages') || 0;
+
+    if (user.id === interaction.user.id) {
+      return interaction.reply({ embeds: [errorEmbed('Invalid Target', 'You cannot ban yourself.')], ephemeral: true });
+    }
+    if (user.id === client.user.id) {
+      return interaction.reply({ embeds: [errorEmbed('Invalid Target', 'I cannot ban myself.')], ephemeral: true });
+    }
+
     const duration = parseDuration(durationStr);
+    if (durationStr && durationStr.toLowerCase() !== 'perm' && durationStr.toLowerCase() !== 'permanent' && !duration) {
+      return interaction.reply({ embeds: [errorEmbed('Invalid Duration', 'Provide a valid duration (e.g. 7d, 1h) or "perm".')], ephemeral: true });
+    }
 
     const member = interaction.guild.members.cache.get(user.id);
     if (member && !member.bannable) {
       return interaction.reply({ embeds: [errorEmbed('Cannot Ban', 'I cannot ban this user.')], ephemeral: true });
     }
 
-    // DM user before ban
+    try {
+      await interaction.guild.members.ban(user, { reason, deleteMessageSeconds: deleteMessages * 86400 });
+    } catch (err) {
+      logger.error(`Ban failed for ${user.id}: ${err.message}`);
+      return interaction.reply({ embeds: [errorEmbed('Ban Failed', 'Could not ban this user. Check my permissions and role hierarchy.')], ephemeral: true });
+    }
+
+    const now = nowUnixSeconds();
+    const expiresAt = duration ? now + duration : null;
+
+    const result = await query(
+      'INSERT INTO infractions (guild_id, user_id, moderator_id, type, reason, duration, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
+      [interaction.guildId, user.id, interaction.user.id, 'ban', reason, duration, expiresAt]
+    );
+
+    const caseId = result.rows[0].id;
+
+    // DM after action succeeds — may fail if user has DMs disabled
     try {
       await user.send(`You have been banned from **${interaction.guild.name}**.\nReason: ${reason}${duration ? `\nDuration: ${formatDuration(duration)}` : ''}`);
     } catch {}
 
-    await interaction.guild.members.ban(user, { reason, deleteMessageSeconds: deleteMessages * 86400 });
-
-    const db = getDb();
-    const now = Math.floor(Date.now() / 1000);
-    const expiresAt = duration ? now + duration : null;
-
-    const result = db.prepare(
-      'INSERT INTO infractions (guild_id, user_id, moderator_id, type, reason, duration, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(interaction.guildId, user.id, interaction.user.id, 'ban', reason, duration, expiresAt);
-
-    const caseId = result.lastInsertRowid;
-
     await interaction.reply({ embeds: [successEmbed('User Banned', `**${user.tag || user.username}** has been banned.\nCase #${caseId}`)] });
 
-    // Mod log
-    const config = getGuildConfig(interaction.guildId);
-    if (config.mod_log_channel) {
-      const channel = interaction.guild.channels.cache.get(config.mod_log_channel);
-      if (channel) {
-        channel.send({ embeds: [modLogEmbed('Ban', user, interaction.user, reason, duration ? formatDuration(duration) : null, caseId)] }).catch(() => {});
+    try {
+      const config = await getGuildConfig(interaction.guildId);
+      if (config.mod_log_channel) {
+        const channel = interaction.guild.channels.cache.get(config.mod_log_channel);
+        if (channel) {
+          channel.send({ embeds: [modLogEmbed('Ban', user, interaction.user, reason, duration ? formatDuration(duration) : null, caseId)] })
+            .catch(err => logger.warn(`Log send failed: ${err.message}`));
+        }
       }
+    } catch (err) {
+      logger.warn(`Mod log error: ${err.message}`);
     }
   },
 };

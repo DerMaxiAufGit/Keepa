@@ -1,11 +1,14 @@
 const { SlashCommandBuilder, PermissionsBitField, ChannelType } = require('discord.js');
 const { successEmbed, errorEmbed } = require('../../utils/embeds');
-const { getDb } = require('../../utils/db');
+const { query } = require('../../utils/db');
+const logger = require('../../utils/logger');
 
-function getUserTempChannel(interaction) {
-  const db = getDb();
-  return db.prepare('SELECT * FROM temp_channels WHERE guild_id = ? AND owner_id = ?')
-    .get(interaction.guildId, interaction.user.id);
+async function getUserTempChannel(interaction) {
+  const { rows } = await query(
+    'SELECT * FROM temp_channels WHERE guild_id = $1 AND owner_id = $2',
+    [interaction.guildId, interaction.user.id]
+  );
+  return rows[0];
 }
 
 module.exports = {
@@ -29,7 +32,6 @@ module.exports = {
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
-    const db = getDb();
 
     if (sub === 'setup') {
       if (!interaction.memberPermissions.has('ManageChannels')) {
@@ -37,16 +39,19 @@ module.exports = {
       }
       const channel = interaction.options.getChannel('channel');
       try {
-        db.prepare('INSERT OR REPLACE INTO temp_channel_hubs (channel_id, guild_id, category_id) VALUES (?, ?, ?)')
-          .run(channel.id, interaction.guildId, channel.parentId);
+        await query(
+          'INSERT INTO temp_channel_hubs (channel_id, guild_id, category_id) VALUES ($1, $2, $3) ON CONFLICT (channel_id) DO UPDATE SET guild_id = $2, category_id = $3',
+          [channel.id, interaction.guildId, channel.parentId]
+        );
         return interaction.reply({ embeds: [successEmbed('Hub Set', `${channel} is now a temp channel hub.`)], ephemeral: true });
       } catch (err) {
-        return interaction.reply({ embeds: [errorEmbed('Error', err.message)], ephemeral: true });
+        logger.error(`Tempchannel setup error: ${err.stack}`);
+        return interaction.reply({ embeds: [errorEmbed('Error', 'Could not set up the hub channel.')], ephemeral: true });
       }
     }
 
     // All other subcommands require owning a temp channel
-    const temp = getUserTempChannel(interaction);
+    const temp = await getUserTempChannel(interaction);
     if (!temp) return interaction.reply({ embeds: [errorEmbed('No Channel', 'You don\'t own a temp channel.')], ephemeral: true });
 
     const channel = interaction.guild.channels.cache.get(temp.channel_id);
@@ -54,39 +59,69 @@ module.exports = {
 
     if (sub === 'name') {
       const name = interaction.options.getString('name');
-      await channel.setName(name);
+      try {
+        await channel.setName(name);
+      } catch (err) {
+        logger.error(`Temp channel rename error: ${err.stack}`);
+        return interaction.reply({ embeds: [errorEmbed('Error', 'Could not rename the channel.')], ephemeral: true });
+      }
       return interaction.reply({ embeds: [successEmbed('Renamed', `Channel renamed to **${name}**.`)], ephemeral: true });
     }
 
     if (sub === 'limit') {
       const limit = interaction.options.getInteger('number');
-      await channel.setUserLimit(limit);
+      try {
+        await channel.setUserLimit(limit);
+      } catch (err) {
+        logger.error(`Temp channel limit error: ${err.stack}`);
+        return interaction.reply({ embeds: [errorEmbed('Error', 'Could not set the user limit.')], ephemeral: true });
+      }
       return interaction.reply({ embeds: [successEmbed('Limit Set', limit === 0 ? 'Limit removed.' : `Limit set to **${limit}**.`)], ephemeral: true });
     }
 
     if (sub === 'lock') {
-      await channel.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: false });
+      try {
+        await channel.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: false });
+      } catch (err) {
+        logger.error(`Temp channel lock error: ${err.stack}`);
+        return interaction.reply({ embeds: [errorEmbed('Error', 'Could not lock the channel.')], ephemeral: true });
+      }
       return interaction.reply({ embeds: [successEmbed('Locked', 'Your channel is now locked.')], ephemeral: true });
     }
 
     if (sub === 'unlock') {
-      await channel.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: null });
+      try {
+        await channel.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: null });
+      } catch (err) {
+        logger.error(`Temp channel unlock error: ${err.stack}`);
+        return interaction.reply({ embeds: [errorEmbed('Error', 'Could not unlock the channel.')], ephemeral: true });
+      }
       return interaction.reply({ embeds: [successEmbed('Unlocked', 'Your channel is now unlocked.')], ephemeral: true });
     }
 
     if (sub === 'permit') {
       const user = interaction.options.getUser('user');
-      await channel.permissionOverwrites.edit(user.id, { Connect: true, ViewChannel: true });
+      try {
+        await channel.permissionOverwrites.edit(user.id, { Connect: true, ViewChannel: true });
+      } catch (err) {
+        logger.error(`Temp channel permit error: ${err.stack}`);
+        return interaction.reply({ embeds: [errorEmbed('Error', 'Could not update permissions.')], ephemeral: true });
+      }
       return interaction.reply({ embeds: [successEmbed('Permitted', `${user} can now join.`)], ephemeral: true });
     }
 
     if (sub === 'reject') {
       const user = interaction.options.getUser('user');
-      await channel.permissionOverwrites.edit(user.id, { Connect: false });
+      try {
+        await channel.permissionOverwrites.edit(user.id, { Connect: false });
+      } catch (err) {
+        logger.error(`Temp channel reject error: ${err.stack}`);
+        return interaction.reply({ embeds: [errorEmbed('Error', 'Could not update permissions.')], ephemeral: true });
+      }
       // Disconnect if in channel
       const member = interaction.guild.members.cache.get(user.id);
       if (member?.voice?.channelId === channel.id) {
-        await member.voice.disconnect().catch(() => {});
+        await member.voice.disconnect().catch(err => logger.warn(`Disconnect failed: ${err.message}`));
       }
       return interaction.reply({ embeds: [successEmbed('Rejected', `${user} can no longer join.`)], ephemeral: true });
     }

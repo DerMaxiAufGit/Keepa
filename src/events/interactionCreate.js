@@ -1,8 +1,10 @@
 const logger = require('../utils/logger');
 const { errorEmbed } = require('../utils/embeds');
 const { checkPermissions, checkBotPermissions } = require('../utils/permissions');
-const { getDb, getGuildConfig } = require('../utils/db');
+const { query } = require('../utils/db');
+const { validateAssignableRole } = require('../utils/roleValidation');
 const { handleTempChannelButton, handleTempChannelModal, handleTempChannelSelect } = require('../handlers/tempChannelPanelHandler');
+const { createTicket, closeTicket } = require('../handlers/ticketHandler');
 
 module.exports = {
   async execute(interaction, client) {
@@ -36,7 +38,6 @@ module.exports = {
       // Ticket creation button
       if (interaction.customId === 'create_ticket') {
         try {
-          const { createTicket } = require('../handlers/ticketHandler');
           await createTicket(interaction, client);
         } catch (err) {
           logger.error(`Ticket creation error: ${err.stack}`);
@@ -47,7 +48,6 @@ module.exports = {
       // Ticket close button
       if (interaction.customId === 'close_ticket') {
         try {
-          const { closeTicket } = require('../handlers/ticketHandler');
           await closeTicket(interaction, client, 'Closed via button');
         } catch (err) {
           logger.error(`Ticket close error: ${err.stack}`);
@@ -68,14 +68,20 @@ module.exports = {
       // Button roles
       if (interaction.customId.startsWith('role_')) {
         try {
-          const db = getDb();
-          const row = db.prepare(
-            'SELECT * FROM component_roles WHERE message_id = ? AND custom_id = ?'
-          ).get(interaction.message.id, interaction.customId);
+          const { rows } = await query(
+            'SELECT role_id FROM component_roles WHERE message_id = $1 AND custom_id = $2',
+            [interaction.message.id, interaction.customId]
+          );
+          const row = rows[0];
 
           if (!row) return;
           const role = interaction.guild.roles.cache.get(row.role_id);
           if (!role) return interaction.reply({ content: 'Role not found.', ephemeral: true });
+
+          const validation = validateAssignableRole(role, interaction.guild);
+          if (!validation.valid) {
+            return interaction.reply({ content: `I cannot manage the **${role.name}** role: ${validation.reason}.`, ephemeral: true });
+          }
 
           const member = interaction.member;
           if (member.roles.cache.has(role.id)) {
@@ -87,6 +93,9 @@ module.exports = {
           }
         } catch (err) {
           logger.error(`Button role error: ${err.stack}`);
+          if (!interaction.replied && !interaction.deferred) {
+            await interaction.reply({ content: 'Failed to update your role.', ephemeral: true }).catch(() => {});
+          }
         }
         return;
       }
