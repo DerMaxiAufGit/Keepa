@@ -1,10 +1,11 @@
 const logger = require('../utils/logger');
-const { errorEmbed } = require('../utils/embeds');
+const { errorEmbed, successEmbed } = require('../utils/embeds');
+const { VALID_MESSAGE_TYPES } = require('../utils/ticketTemplates');
 const { checkPermissions, checkBotPermissions } = require('../utils/permissions');
 const { query } = require('../utils/db');
 const { validateAssignableRole } = require('../utils/roleValidation');
 const { handleTempChannelButton, handleTempChannelModal, handleTempChannelSelect } = require('../handlers/tempChannelPanelHandler');
-const { createTicket, closeTicket } = require('../handlers/ticketHandler');
+const { createTicket, closeTicket, reopenTicket, claimTicket, deleteTicket } = require('../handlers/ticketHandler');
 
 module.exports = {
   async execute(interaction, client) {
@@ -51,6 +52,36 @@ module.exports = {
           await closeTicket(interaction, client, 'Closed via button');
         } catch (err) {
           logger.error(`Ticket close error: ${err.stack}`);
+        }
+        return;
+      }
+
+      // Ticket re-open button
+      if (interaction.customId === 'ticket_reopen') {
+        try {
+          await reopenTicket(interaction, client);
+        } catch (err) {
+          logger.error(`Ticket reopen error: ${err.stack}`);
+        }
+        return;
+      }
+
+      // Ticket claim button
+      if (interaction.customId === 'ticket_claim') {
+        try {
+          await claimTicket(interaction, client);
+        } catch (err) {
+          logger.error(`Ticket claim error: ${err.stack}`);
+        }
+        return;
+      }
+
+      // Ticket delete button
+      if (interaction.customId === 'ticket_delete') {
+        try {
+          await deleteTicket(interaction, client);
+        } catch (err) {
+          logger.error(`Ticket delete error: ${err.stack}`);
         }
         return;
       }
@@ -103,6 +134,30 @@ module.exports = {
 
     // Modal submissions
     if (interaction.isModalSubmit()) {
+      // Ticket message template edit modal
+      if (interaction.customId.startsWith('ticket_msg_edit_')) {
+        try {
+          const messageType = interaction.customId.replace('ticket_msg_edit_', '');
+          if (!VALID_MESSAGE_TYPES.has(messageType)) {
+            return interaction.reply({ embeds: [errorEmbed('Invalid Type', 'Unknown message type.')], ephemeral: true });
+          }
+          const title = interaction.fields.getTextInputValue('ticket_msg_title');
+          const content = interaction.fields.getTextInputValue('ticket_msg_content');
+          await query(
+            `INSERT INTO ticket_messages (guild_id, message_type, title, content) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (guild_id, message_type) DO UPDATE SET title = $3, content = $4`,
+            [interaction.guildId, messageType, title, content]
+          );
+          await interaction.reply({ embeds: [successEmbed('Template Updated', `The **${messageType}** template has been saved.`)], ephemeral: true });
+        } catch (err) {
+          logger.error(`Ticket message modal error: ${err.stack}`);
+          if (!interaction.replied && !interaction.deferred) {
+            await interaction.reply({ embeds: [errorEmbed('Error', 'Failed to save template.')], ephemeral: true }).catch(() => {});
+          }
+        }
+        return;
+      }
+
       if (interaction.customId.startsWith('tc_modal_')) {
         try {
           await handleTempChannelModal(interaction);

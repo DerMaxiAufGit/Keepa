@@ -2,19 +2,31 @@ const { ChannelType, PermissionsBitField, EmbedBuilder, ActionRowBuilder, Button
 const { query } = require('../utils/db');
 const { errorEmbed, successEmbed, Colors } = require('../utils/embeds');
 const { nowUnixSeconds } = require('../utils/time');
+const { getTemplate, resolvePlaceholders } = require('../utils/ticketTemplates');
 const logger = require('../utils/logger');
 
 const MAX_TRANSCRIPT_BATCHES = 20;
 
+function parseSupportRoles(raw) {
+  try { return JSON.parse(raw || '[]'); } catch { return []; }
+}
+
+function hasSupportAccess(member, supportRoles) {
+  return member.permissions.has(PermissionsBitField.Flags.ManageChannels)
+    || supportRoles.some(roleId => member.roles.cache.has(roleId));
+}
+
 async function createTicket(interaction, client) {
-  const { rows: configRows } = await query('SELECT guild_id, enabled, category_id, log_channel, support_roles, max_open, transcript_channel FROM ticket_config WHERE guild_id = $1', [interaction.guildId]);
+  const { rows: configRows } = await query(
+    'SELECT guild_id, enabled, category_id, log_channel, support_roles, max_open, transcript_channel FROM ticket_config WHERE guild_id = $1',
+    [interaction.guildId]
+  );
   const config = configRows[0];
 
   if (!config || !config.enabled) {
     return interaction.reply({ embeds: [errorEmbed('Tickets Disabled', 'The ticket system is not configured.')], ephemeral: true });
   }
 
-  // Check max open tickets
   const { rows: countRows } = await query(
     "SELECT COUNT(*) as count FROM tickets WHERE guild_id = $1 AND user_id = $2 AND status = 'open'",
     [interaction.guildId, interaction.user.id]
@@ -24,15 +36,14 @@ async function createTicket(interaction, client) {
     return interaction.reply({ embeds: [errorEmbed('Limit Reached', `You can only have ${config.max_open} open ticket(s).`)], ephemeral: true });
   }
 
-  // Create ticket channel
-  const { rows: totalRows } = await query('SELECT COUNT(*) as count FROM tickets WHERE guild_id = $1', [interaction.guildId]);
-  const ticketNum = parseInt(totalRows[0].count, 10) + 1;
-  let supportRoles = [];
-  try {
-    supportRoles = JSON.parse(config.support_roles || '[]');
-  } catch {
-    supportRoles = [];
-  }
+  const supportRoles = parseSupportRoles(config.support_roles);
+
+  // Reserve ticket number via INSERT RETURNING to avoid race conditions
+  const { rows: insertRows } = await query(
+    "INSERT INTO tickets (guild_id, channel_id, user_id) VALUES ($1, 'pending', $2) RETURNING id",
+    [interaction.guildId, interaction.user.id]
+  );
+  const ticketNum = insertRows[0].id;
 
   const permissionOverwrites = [
     { id: interaction.guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
@@ -55,19 +66,27 @@ async function createTicket(interaction, client) {
       permissionOverwrites,
     });
 
-    await query(
-      'INSERT INTO tickets (guild_id, channel_id, user_id) VALUES ($1, $2, $3)',
-      [interaction.guildId, channel.id, interaction.user.id]
-    );
+    await query('UPDATE tickets SET channel_id = $1 WHERE id = $2', [channel.id, ticketNum]);
+
+    const template = await getTemplate(interaction.guildId, 'welcome');
+    const ctx = {
+      user: `${interaction.user}`,
+      userTag: interaction.user.tag || interaction.user.username,
+      ticket: String(ticketNum),
+      channel: `${channel}`,
+      server: interaction.guild.name,
+    };
 
     const embed = new EmbedBuilder()
       .setColor(Colors.INFO)
-      .setTitle(`Ticket #${ticketNum}`)
-      .setDescription(`Welcome ${interaction.user}! A staff member will be with you shortly.\nUse \`/ticket close\` to close this ticket.`)
-      .setTimestamp().setFooter({ text: 'Keepa' });
+      .setTitle(resolvePlaceholders(template.title, ctx))
+      .setDescription(resolvePlaceholders(template.content, ctx))
+      .setTimestamp()
+      .setFooter({ text: 'Keepa' });
 
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('close_ticket').setLabel('Close Ticket').setStyle(ButtonStyle.Danger)
+      new ButtonBuilder().setCustomId('close_ticket').setLabel('Close Ticket').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('ticket_claim').setLabel('Claim Ticket').setStyle(ButtonStyle.Secondary)
     );
 
     await channel.send({ embeds: [embed], components: [row] });
@@ -89,28 +108,19 @@ async function closeTicket(interaction, client, reason) {
     return interaction.reply({ embeds: [errorEmbed('Not a Ticket', 'This is not an open ticket channel.')], ephemeral: true });
   }
 
-  // Authorization check: ticket owner, support role, or ManageChannels
   const isOwner = ticket.user_id === interaction.user.id;
-  const hasManageChannels = interaction.member.permissions.has(PermissionsBitField.Flags.ManageChannels);
-
-  let hasSupportRole = false;
   const { rows: configRows } = await query('SELECT support_roles, transcript_channel FROM ticket_config WHERE guild_id = $1', [interaction.guildId]);
-  if (configRows[0]) {
-    let supportRoles = [];
-    try { supportRoles = JSON.parse(configRows[0].support_roles || '[]'); } catch {}
-    hasSupportRole = supportRoles.some(roleId => interaction.member.roles.cache.has(roleId));
-  }
+  const supportRoles = parseSupportRoles(configRows[0]?.support_roles);
+  const hasAccess = isOwner || hasSupportAccess(interaction.member, supportRoles);
 
-  if (!isOwner && !hasManageChannels && !hasSupportRole) {
+  if (!hasAccess) {
     return interaction.reply({ embeds: [errorEmbed('No Permission', 'You do not have permission to close this ticket.')], ephemeral: true });
   }
 
   await interaction.deferReply();
 
-  // Generate transcript
+  // Generate and log transcript
   const transcript = await generateTranscript(interaction.channel, ticket);
-
-  // Log transcript
   const config = configRows[0];
   if (config?.transcript_channel) {
     const logChannel = interaction.guild.channels.cache.get(config.transcript_channel);
@@ -124,15 +134,202 @@ async function closeTicket(interaction, client, reason) {
           { name: 'Closed by', value: `${interaction.user}`, inline: true },
           { name: 'Reason', value: reason || 'No reason' }
         )
-        .setTimestamp().setFooter({ text: 'Keepa' });
+        .setTimestamp()
+        .setFooter({ text: 'Keepa' });
       await logChannel.send({ embeds: [embed], files: [attachment] }).catch(err => logger.warn(`Transcript send failed: ${err.message}`));
     }
   }
 
   const now = nowUnixSeconds();
-  await query("UPDATE tickets SET status = 'closed', closed_at = $1 WHERE id = $2", [now, ticket.id]);
+  await query(
+    "UPDATE tickets SET status = 'closed', closed_at = $1, closed_by = $2 WHERE id = $3",
+    [now, interaction.user.id, ticket.id]
+  );
 
-  await interaction.editReply({ embeds: [successEmbed('Ticket Closed', 'This channel will be deleted in 5 seconds.')] });
+  // Lock channel instead of deleting
+  try {
+    await interaction.channel.permissionOverwrites.edit(ticket.user_id, { SendMessages: false });
+    await interaction.channel.permissionOverwrites.edit(interaction.guild.roles.everyone.id, { SendMessages: false });
+  } catch (err) {
+    logger.warn(`Failed to lock ticket channel: ${err.message}`);
+  }
+
+  const template = await getTemplate(interaction.guildId, 'close');
+  const ctx = {
+    user: `<@${ticket.user_id}>`,
+    userTag: ticket.user_id,
+    staff: `${interaction.user}`,
+    ticket: String(ticket.id),
+    channel: `${interaction.channel}`,
+    reason: reason || 'No reason provided',
+    server: interaction.guild.name,
+  };
+
+  const closeEmbed = new EmbedBuilder()
+    .setColor(Colors.ERROR)
+    .setTitle(resolvePlaceholders(template.title, ctx))
+    .setDescription(resolvePlaceholders(template.content, ctx))
+    .setTimestamp()
+    .setFooter({ text: 'Keepa' });
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('ticket_reopen').setLabel('Re-open').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('ticket_delete').setLabel('Delete').setStyle(ButtonStyle.Danger)
+  );
+
+  await interaction.editReply({ embeds: [closeEmbed], components: [row] });
+}
+
+async function reopenTicket(interaction, client) {
+  const { rows: ticketRows } = await query(
+    "SELECT id, guild_id, channel_id, user_id, assigned_to, status FROM tickets WHERE channel_id = $1 AND status = 'closed'",
+    [interaction.channelId]
+  );
+  const ticket = ticketRows[0];
+
+  if (!ticket) {
+    return interaction.reply({ embeds: [errorEmbed('Cannot Re-open', 'This is not a closed ticket channel.')], ephemeral: true });
+  }
+
+  const isOwner = ticket.user_id === interaction.user.id;
+  const { rows: configRows } = await query('SELECT support_roles FROM ticket_config WHERE guild_id = $1', [interaction.guildId]);
+  const supportRoles = parseSupportRoles(configRows[0]?.support_roles);
+  const hasAccess = isOwner || hasSupportAccess(interaction.member, supportRoles);
+
+  if (!hasAccess) {
+    return interaction.reply({ embeds: [errorEmbed('No Permission', 'You do not have permission to re-open this ticket.')], ephemeral: true });
+  }
+
+  await interaction.deferReply();
+
+  // Restore permissions
+  try {
+    await interaction.channel.permissionOverwrites.edit(ticket.user_id, { SendMessages: true });
+    await interaction.channel.permissionOverwrites.edit(interaction.guild.roles.everyone.id, { SendMessages: null });
+  } catch (err) {
+    logger.warn(`Failed to restore ticket permissions: ${err.message}`);
+  }
+
+  const now = nowUnixSeconds();
+  await query(
+    "UPDATE tickets SET status = 'open', reopened_at = $1, closed_at = NULL, closed_by = NULL WHERE id = $2",
+    [now, ticket.id]
+  );
+
+  const template = await getTemplate(interaction.guildId, 'reopen');
+  const ctx = {
+    user: `${interaction.user}`,
+    userTag: interaction.user.tag || interaction.user.username,
+    ticket: String(ticket.id),
+    channel: `${interaction.channel}`,
+    server: interaction.guild.name,
+  };
+
+  const embed = new EmbedBuilder()
+    .setColor(Colors.SUCCESS)
+    .setTitle(resolvePlaceholders(template.title, ctx))
+    .setDescription(resolvePlaceholders(template.content, ctx))
+    .setTimestamp()
+    .setFooter({ text: 'Keepa' });
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('close_ticket').setLabel('Close Ticket').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('ticket_claim').setLabel('Claim Ticket').setStyle(ButtonStyle.Secondary)
+  );
+
+  await interaction.editReply({ embeds: [embed], components: [row] });
+}
+
+async function claimTicket(interaction, client) {
+  const { rows: ticketRows } = await query(
+    "SELECT id, guild_id, channel_id, user_id, assigned_to, claimed_by, status FROM tickets WHERE channel_id = $1 AND status = 'open'",
+    [interaction.channelId]
+  );
+  const ticket = ticketRows[0];
+
+  if (!ticket) {
+    return interaction.reply({ embeds: [errorEmbed('Cannot Claim', 'This is not an open ticket channel.')], ephemeral: true });
+  }
+
+  const { rows: configRows } = await query('SELECT support_roles FROM ticket_config WHERE guild_id = $1', [interaction.guildId]);
+  const supportRoles = parseSupportRoles(configRows[0]?.support_roles);
+
+  if (!hasSupportAccess(interaction.member, supportRoles)) {
+    return interaction.reply({ embeds: [errorEmbed('No Permission', 'Only staff members can claim tickets.')], ephemeral: true });
+  }
+
+  if (ticket.claimed_by) {
+    return interaction.reply({ embeds: [errorEmbed('Already Claimed', `This ticket is already claimed by <@${ticket.claimed_by}>.`)], ephemeral: true });
+  }
+
+  await query(
+    'UPDATE tickets SET claimed_by = $1, assigned_to = $1 WHERE id = $2',
+    [interaction.user.id, ticket.id]
+  );
+
+  // Grant claimer channel permissions
+  try {
+    await interaction.channel.permissionOverwrites.edit(interaction.user.id, {
+      ViewChannel: true, SendMessages: true, ReadMessageHistory: true,
+    });
+  } catch (err) {
+    logger.warn(`Failed to set claim permissions: ${err.message}`);
+  }
+
+  const template = await getTemplate(interaction.guildId, 'claim');
+  const ctx = {
+    user: `<@${ticket.user_id}>`,
+    staff: `${interaction.user}`,
+    ticket: String(ticket.id),
+    channel: `${interaction.channel}`,
+    server: interaction.guild.name,
+  };
+
+  const embed = new EmbedBuilder()
+    .setColor(Colors.INFO)
+    .setTitle(resolvePlaceholders(template.title, ctx))
+    .setDescription(resolvePlaceholders(template.content, ctx))
+    .setTimestamp()
+    .setFooter({ text: 'Keepa' });
+
+  await interaction.reply({ embeds: [embed] });
+}
+
+async function deleteTicket(interaction, client) {
+  const { rows: ticketRows } = await query(
+    "SELECT id, guild_id, channel_id, user_id, status FROM tickets WHERE channel_id = $1 AND status = 'closed'",
+    [interaction.channelId]
+  );
+  const ticket = ticketRows[0];
+
+  if (!ticket) {
+    return interaction.reply({ embeds: [errorEmbed('Cannot Delete', 'Only closed tickets can be deleted.')], ephemeral: true });
+  }
+
+  const { rows: configRows } = await query('SELECT support_roles FROM ticket_config WHERE guild_id = $1', [interaction.guildId]);
+  const supportRoles = parseSupportRoles(configRows[0]?.support_roles);
+
+  if (!hasSupportAccess(interaction.member, supportRoles)) {
+    return interaction.reply({ embeds: [errorEmbed('No Permission', 'Only staff members can delete tickets.')], ephemeral: true });
+  }
+
+  const template = await getTemplate(interaction.guildId, 'delete');
+  const ctx = {
+    user: `<@${ticket.user_id}>`,
+    staff: `${interaction.user}`,
+    ticket: String(ticket.id),
+    channel: `${interaction.channel}`,
+    server: interaction.guild.name,
+  };
+
+  const embed = new EmbedBuilder()
+    .setColor(Colors.ERROR)
+    .setTitle(resolvePlaceholders(template.title, ctx))
+    .setDescription(resolvePlaceholders(template.content, ctx))
+    .setTimestamp()
+    .setFooter({ text: 'Keepa' });
+
+  await interaction.reply({ embeds: [embed] });
   setTimeout(() => interaction.channel.delete().catch(err => logger.warn(`Ticket channel delete failed: ${err.message}`)), 5000);
 }
 
@@ -169,4 +366,4 @@ function escapeHtml(text) {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-module.exports = { createTicket, closeTicket };
+module.exports = { createTicket, closeTicket, reopenTicket, claimTicket, deleteTicket };

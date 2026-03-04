@@ -168,3 +168,27 @@ CREATE TABLE IF NOT EXISTS scheduled_messages (
   cron TEXT NOT NULL,
   enabled INTEGER DEFAULT 1
 );
+
+-- Ticket system: add lifecycle columns (idempotent)
+DO $$ BEGIN
+  ALTER TABLE tickets ADD COLUMN closed_by TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  ALTER TABLE tickets ADD COLUMN claimed_by TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  ALTER TABLE tickets ADD COLUMN reopened_at BIGINT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+CREATE TABLE IF NOT EXISTS ticket_messages (
+  guild_id TEXT NOT NULL,
+  message_type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  PRIMARY KEY (guild_id, message_type)
+);

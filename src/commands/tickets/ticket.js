@@ -1,7 +1,7 @@
 const { SlashCommandBuilder, PermissionsBitField } = require('discord.js');
 const { successEmbed, errorEmbed } = require('../../utils/embeds');
 const { query } = require('../../utils/db');
-const { closeTicket } = require('../../handlers/ticketHandler');
+const { closeTicket, reopenTicket } = require('../../handlers/ticketHandler');
 const logger = require('../../utils/logger');
 
 module.exports = {
@@ -17,7 +17,8 @@ module.exports = {
     .addSubcommand(s => s.setName('assign').setDescription('Assign staff to this ticket')
       .addUserOption(o => o.setName('user').setDescription('Staff member').setRequired(true)))
     .addSubcommand(s => s.setName('rename').setDescription('Rename this ticket')
-      .addStringOption(o => o.setName('name').setDescription('New name').setRequired(true))),
+      .addStringOption(o => o.setName('name').setDescription('New name').setRequired(true)))
+    .addSubcommand(s => s.setName('reopen').setDescription('Re-open a closed ticket')),
   permissions: [],
   botPermissions: ['ManageChannels'],
 
@@ -27,6 +28,10 @@ module.exports = {
     if (sub === 'close') {
       const reason = interaction.options.getString('reason');
       return closeTicket(interaction, client, reason);
+    }
+
+    if (sub === 'reopen') {
+      return reopenTicket(interaction, client);
     }
 
     // Check this is a ticket channel
