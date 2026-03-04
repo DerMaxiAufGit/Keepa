@@ -56,7 +56,7 @@ Self-hosted, all-in-one Discord server management bot built with **Discord.js v1
 
 ```bash
 # 1. Clone and install
-git clone <repo-url> && cd keepa
+git clone https://github.com/DerMaxiAufGit/Keepa.git && cd Keepa
 npm install
 
 # 2. Configure

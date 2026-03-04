@@ -10,7 +10,7 @@
 
 ```bash
 # Clone the repo
-git clone <repo-url> && cd keepa
+git clone https://github.com/DerMaxiAufGit/Keepa.git && cd Keepa
 
 # Install dependencies
 npm install
