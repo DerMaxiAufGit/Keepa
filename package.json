@@ -1,0 +1,21 @@
+{
+  "name": "keepa",
+  "version": "1.0.0",
+  "description": "Self-hosted all-in-one Discord server management bot",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "deploy": "node src/deploy-commands.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "better-sqlite3": "^11.7.0",
+    "winston": "^3.17.0",
+    "node-cron": "^3.0.3",
+    "dotenv": "^16.4.7",
+    "axios": "^1.7.9"
+  }
+}
