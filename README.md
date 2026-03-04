@@ -77,6 +77,8 @@ npm start
 
 ```bash
 cp .env.example .env   # configure
+# IMPORTANT: set DATABASE_URL host to "postgres" (the service name), not "localhost":
+#   DATABASE_URL=postgresql://keepa:<your-password>@postgres:5432/keepa
 docker compose up -d   # starts both Postgres and the bot
 npm run deploy         # register slash commands
 ```
